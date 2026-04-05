@@ -38,16 +38,25 @@ func _physics_process(delta: float) -> void:
 	var tgt_pitch := 0.0
 
 	if rx != 0.0 or ry != 0.0:
-		# back_blend: 0 when stick is centred/up, 1 when stick is fully down.
-		# As it grows, the rx contribution fades out and the +180° yaw fades in.
-		# This is a single continuous formula with no sign-of-rx branching,
-		# so there is no discontinuity when rx crosses zero near ry=1.
-		var back_blend := clampf(ry, 0.0, 1.0)
-		tgt_yaw   = -rx * lerpf(_MAX_YAW_SIDE, 0.0, back_blend) + back_blend * PI
-		tgt_pitch = maxf(-ry, 0.0) * _MAX_PITCH
+		if ry <= 0.0:
+			# Upper half — pitch up and/or pan left/right
+			tgt_yaw   = -rx * _MAX_YAW_SIDE
+			tgt_pitch = -ry * _MAX_PITCH
+		else:
+			# Lower half — sweep from side-pan toward full look-behind.
+			# end_yaw is ±PI depending on which side; the angle-wrap below
+			# ensures the lerp always takes the short path, so crossing
+			# rx = 0 near ry = 1 never triggers a full-circle sweep.
+			var start_yaw := -rx * _MAX_YAW_SIDE
+			var end_yaw   := PI * (1.0 if rx <= 0.0 else -1.0)
+			tgt_yaw   = lerpf(start_yaw, end_yaw, ry)
+			tgt_pitch = 0.0
 
-	_yaw_offset   = lerpf(_yaw_offset,   tgt_yaw,   _SNAP_SPEED * delta)
-	_pitch_offset = lerpf(_pitch_offset, tgt_pitch, _SNAP_SPEED * delta)
+	# Shortest-path lerp for yaw — wraps the difference to [-PI, PI] so the
+	# camera always rotates the short way, even across the ±PI boundary.
+	var yaw_diff := fposmod(tgt_yaw - _yaw_offset + PI, TAU) - PI
+	_yaw_offset   = lerpf(_yaw_offset, _yaw_offset + yaw_diff, _SNAP_SPEED * delta)
+	_pitch_offset = lerpf(_pitch_offset, tgt_pitch,             _SNAP_SPEED * delta)
 
 	# ── Build follow offset with pan applied ─────────────────────────────────
 	var tb := target.global_transform.basis
