@@ -1,0 +1,20 @@
+[gd_scene load_steps=6 format=3 uid="uid://dw8ry5jtf6ap1"]
+
+[ext_resource type="Script" uid="uid://cvfe0fmmt1cci" path="res://scenes/main.gd" id="1"]
+[ext_resource type="PackedScene" uid="uid://vsic1v4m1r01" path="res://scenes/world/world.tscn" id="2"]
+[ext_resource type="PackedScene" uid="uid://dm5bxqna27kop" path="res://scenes/plane/plane.tscn" id="3"]
+[ext_resource type="PackedScene" uid="uid://bp6a02sc57mqr" path="res://scenes/camera/chase_camera.tscn" id="4"]
+[ext_resource type="PackedScene" uid="uid://cwujd2w5n2s12" path="res://scenes/ui/hud.tscn" id="5"]
+
+[node name="Main" type="Node3D" unique_id=1576107502]
+script = ExtResource("1")
+
+[node name="World" parent="." unique_id=1674126316 instance=ExtResource("2")]
+
+[node name="Plane" parent="." unique_id=1640481908 instance=ExtResource("3")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 165, -50)
+
+[node name="ChaseCamera" parent="." unique_id=121026052 instance=ExtResource("4")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 169, -38)
+
+[node name="HUD" parent="." unique_id=1827228673 instance=ExtResource("5")]

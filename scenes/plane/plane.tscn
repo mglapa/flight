@@ -1,0 +1,81 @@
+[gd_scene load_steps=12 format=3 uid="uid://dm5bxqna27kop"]
+
+[ext_resource type="Script" uid="uid://c83a8rcvck5ly" path="res://scenes/plane/plane.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="1_mat"]
+albedo_color = Color(0.35, 0.42, 0.3, 1)
+roughness = 0.8
+
+[sub_resource type="StandardMaterial3D" id="2_mat"]
+albedo_color = Color(0.38, 0.45, 0.32, 1)
+roughness = 0.8
+
+[sub_resource type="BoxMesh" id="3_mesh"]
+size = Vector3(1.0, 1.2, 9.8)
+
+[sub_resource type="BoxMesh" id="4_mesh"]
+size = Vector3(11.3, 0.15, 1.7)
+
+[sub_resource type="BoxMesh" id="5_mesh"]
+size = Vector3(4.0, 0.12, 1.1)
+
+[sub_resource type="BoxMesh" id="6_mesh"]
+size = Vector3(0.15, 1.5, 1.5)
+
+[sub_resource type="StandardMaterial3D" id="7_mat"]
+albedo_color = Color(0.12, 0.12, 0.12, 1)
+roughness = 0.9
+
+[sub_resource type="CylinderMesh" id="8_mesh"]
+top_radius = 0.55
+bottom_radius = 0.55
+height = 0.35
+
+[sub_resource type="CylinderMesh" id="9_mesh"]
+top_radius = 0.35
+bottom_radius = 0.35
+height = 0.25
+
+[sub_resource type="BoxShape3D" id="10_hitbox"]
+size = Vector3(12.0, 1.5, 10.0)
+
+[node name="Plane" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="Fuselage" type="MeshInstance3D" parent="."]
+material_override = SubResource("1_mat")
+mesh = SubResource("3_mesh")
+
+[node name="Wings" type="MeshInstance3D" parent="."]
+material_override = SubResource("2_mat")
+mesh = SubResource("4_mesh")
+
+[node name="Tail" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 4.0)
+material_override = SubResource("2_mat")
+mesh = SubResource("5_mesh")
+
+[node name="TailFin" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.3, 4.0)
+material_override = SubResource("1_mat")
+mesh = SubResource("6_mesh")
+
+[node name="WheelLeft" type="MeshInstance3D" parent="."]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, -1.6, -1.5, -2.0)
+material_override = SubResource("7_mat")
+mesh = SubResource("8_mesh")
+
+[node name="WheelRight" type="MeshInstance3D" parent="."]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 1.6, -1.5, -2.0)
+material_override = SubResource("7_mat")
+mesh = SubResource("8_mesh")
+
+[node name="TailWheel" type="MeshInstance3D" parent="."]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, -1.2, 3.8)
+material_override = SubResource("7_mat")
+mesh = SubResource("9_mesh")
+
+[node name="Hitbox" type="StaticBody3D" parent="."]
+
+[node name="HitboxShape" type="CollisionShape3D" parent="Hitbox"]
+shape = SubResource("10_hitbox")

@@ -1,0 +1,379 @@
+extends Node3D
+## Semi-realistic WW2 fighter flight model (Spitfire Mk V class).
+##
+## All physics computed manually for full control and stability.
+## Uses real aerodynamic principles: lift from AoA, drag polar, weathervane
+## stability, and proper damping. Tuned for a War Thunder / IL-2 feel.
+
+# -- Aircraft specs --
+@export_group("Aircraft")
+## Aircraft mass in kg (Spitfire Mk V loaded)
+@export var aircraft_mass: float = 3000.0
+## Wing area in m²
+@export var wing_area: float = 22.0
+## Wing span in m (used for aspect ratio)
+@export var wing_span: float = 11.2
+## Max engine thrust in Newtons (~1,200 hp Merlin engine)
+@export var max_thrust: float = 15000.0
+## How quickly throttle responds
+@export var throttle_response: float = 2.0
+
+@export_group("Control Sensitivity")
+## Pitch rate authority (rad/s² at cruise speed)
+@export var pitch_power: float = 4.0
+## Roll rate authority
+@export var roll_power: float = 6.0
+## Yaw rate authority (rudder is weaker than ailerons)
+@export var yaw_power: float = 1.5
+
+@export_group("Stability & Damping")
+## Pitch stability — tail pushes nose toward velocity (reduces AoA)
+@export var pitch_stability: float = 1.5
+## Yaw stability — vertical tail fin keeps nose aligned with velocity
+@export var yaw_stability: float = 5.0
+## Dihedral effect — sideslip causes corrective roll
+@export var dihedral_effect: float = 2.0
+## Pitch angular damping
+@export var pitch_damping: float = 3.5
+## Roll angular damping
+@export var roll_damping: float = 4.0
+## Yaw angular damping
+@export var yaw_damping: float = 4.0
+## Auto-level strength (gently rolls toward wings-level with no input)
+@export var auto_level: float = 0.5
+
+# -- Constants --
+const AIR_DENSITY: float = 1.225  # kg/m³ at sea level
+const GRAVITY: float = 9.81
+
+# Wheel contact points in local space — must match plane.tscn geometry
+const WHEEL_L = Vector3(-1.60, -1.50, -2.0)   # left main gear
+const WHEEL_R = Vector3( 1.60, -1.50, -2.0)   # right main gear
+const WHEEL_T = Vector3(  0.0, -1.20,  3.8)   # tail wheel
+
+# Gun muzzle positions in local space (2 per wing, near leading edge)
+const GUN_POSITIONS: Array = [
+	Vector3(-4.5, 0.0, -0.8),   # left outer
+	Vector3(-3.0, 0.0, -0.8),   # left inner
+	Vector3( 3.0, 0.0, -0.8),   # right inner
+	Vector3( 4.5, 0.0, -0.8),   # right outer
+]
+const BULLET_SPEED  := 800.0   # m/s — .303 Browning muzzle velocity
+const FIRE_INTERVAL := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
+
+var _gun_index: int  = 0
+var _fire_timer: float = 0.0
+var _bullet_script = preload("res://scenes/plane/bullet.gd")
+
+# -- Aero coefficients --
+## Lift curve slope per radian (typical finite wing)
+var cl_slope: float = 5.0
+## Lift coefficient at zero angle of attack (cambered airfoil)
+var cl_0: float = 0.15
+## Parasitic drag coefficient (clean WW2 fighter)
+var cd_0: float = 0.025
+## Oswald span efficiency factor
+var oswald: float = 0.78
+## Wing aspect ratio (computed in _ready)
+var aspect_ratio: float
+## Critical angle of attack in degrees
+var stall_alpha_deg: float = 16.0
+
+# -- Physics state --
+var velocity: Vector3 = Vector3.ZERO
+var pitch_rate: float = 0.0   # rad/s, positive = nose up
+var roll_rate: float = 0.0    # rad/s, positive = roll right (clockwise from behind)
+var yaw_rate: float = 0.0     # rad/s, positive = nose right
+
+# -- Exposed to HUD --
+var throttle: float = 0.0
+var current_speed: float = 0.0
+var altitude: float = 0.0
+var is_stalling: bool = false
+var g_force: float = 1.0
+var on_ground: bool = false
+var airspeed_display: float = 0.0  # forward component only, for HUD
+
+var player_health : int = 10
+
+@onready var _hitbox_body : StaticBody3D = $Hitbox
+
+func _ready() -> void:
+	add_to_group("player")
+	aspect_ratio = wing_span * wing_span / wing_area
+	throttle = 0.7
+	# Start at ~290 km/h, airborne
+	velocity = -global_transform.basis.z * 80.0
+
+func take_hit(_hit_pos: Vector3) -> void:
+	player_health -= 1
+	if player_health <= 0:
+		queue_free()
+
+func _physics_process(delta: float) -> void:
+	# ========================
+	# INPUT
+	# ========================
+	var pitch_input := Input.get_axis("pitch_up", "pitch_down")
+	var roll_input := Input.get_axis("roll_right", "roll_left")
+	var yaw_input := Input.get_axis("yaw_left", "yaw_right")
+	var throttle_up := Input.get_action_strength("throttle_up")
+	var throttle_down := Input.get_action_strength("throttle_down")
+
+	throttle = clampf(throttle + (throttle_up - throttle_down) * throttle_response * delta, 0.0, 1.0)
+
+	# ========================
+	# GUNS
+	# ========================
+	_fire_timer = maxf(_fire_timer - delta, 0.0)
+	if Input.is_action_pressed("fire") and _fire_timer == 0.0:
+		_fire_next_gun()
+		_fire_timer = FIRE_INTERVAL
+
+	# ========================
+	# AIRCRAFT AXES
+	# ========================
+	var fwd: Vector3 = -global_transform.basis.z   # nose direction
+	var up: Vector3 = global_transform.basis.y      # wing top direction
+	var right: Vector3 = global_transform.basis.x   # right wing direction
+
+	# ========================
+	# AIRSPEED & ALTITUDE
+	# ========================
+	current_speed = velocity.length()
+	airspeed_display = maxf(velocity.dot(fwd), 0.0)
+	altitude = global_position.y
+
+	# Velocity decomposed into aircraft body frame
+	var vel_fwd: float = velocity.dot(fwd)
+	var vel_up: float = velocity.dot(up)
+	var vel_right: float = velocity.dot(right)
+
+	# ========================
+	# ANGLE OF ATTACK & SIDESLIP
+	# ========================
+	var alpha: float = 0.0   # angle of attack (positive = nose above velocity)
+	var beta: float = 0.0    # sideslip angle
+
+	if current_speed > 3.0:
+		alpha = atan2(-vel_up, maxf(vel_fwd, 3.0))
+		beta = atan2(vel_right, maxf(vel_fwd, 3.0))
+
+	# ========================
+	# DYNAMIC PRESSURE
+	# ========================
+	var q: float = 0.5 * AIR_DENSITY * current_speed * current_speed
+	var qS: float = q * wing_area
+
+	# Control effectiveness scales with airspeed (normalized to ~290 km/h cruise)
+	var q_ref: float = 0.5 * AIR_DENSITY * 80.0 * 80.0
+	var effectiveness: float = clampf(q / q_ref, 0.0, 1.5)
+
+	# ========================
+	# LIFT
+	# ========================
+	var stall_alpha: float = deg_to_rad(stall_alpha_deg)
+	var cl: float
+
+	if absf(alpha) < stall_alpha:
+		# Normal flight: lift increases linearly with AoA
+		cl = cl_0 + cl_slope * alpha
+	else:
+		# Post-stall: lift drops gradually (not a cliff — more forgiving)
+		var cl_at_stall: float = cl_0 + cl_slope * stall_alpha * signf(alpha)
+		var excess: float = absf(alpha) - stall_alpha
+		cl = cl_at_stall * maxf(1.0 - excess * 2.0, 0.2)
+
+	is_stalling = absf(alpha) > stall_alpha and current_speed > 5.0
+
+	var lift_force: Vector3 = up * qS * cl
+
+	# ========================
+	# DRAG (parasitic + induced)
+	# ========================
+	var cd: float = cd_0 + (cl * cl) / (PI * aspect_ratio * oswald)
+	var drag_force: Vector3 = Vector3.ZERO
+	if current_speed > 1.0:
+		drag_force = -velocity.normalized() * qS * cd
+
+	# ========================
+	# SIDE FORCE (fuselage resists sideways motion)
+	# ========================
+	var side_force: Vector3 = -right * qS * beta * 0.5
+
+	# ========================
+	# THRUST
+	# ========================
+	var thrust_force: Vector3 = fwd * max_thrust * throttle
+
+	# ========================
+	# GRAVITY
+	# ========================
+	var weight: Vector3 = Vector3.DOWN * aircraft_mass * GRAVITY
+
+	# ========================
+	# TOTAL FORCE → VELOCITY
+	# ========================
+	var total_force: Vector3 = lift_force + drag_force + side_force + thrust_force + weight
+	var accel: Vector3 = total_force / aircraft_mass
+	velocity += accel * delta
+
+	# ========================
+	# G-FORCE (for HUD)
+	# ========================
+	g_force = (accel + Vector3.UP * GRAVITY).dot(up) / GRAVITY
+
+	# ========================
+	# ANGULAR ACCELERATIONS
+	# ========================
+
+	# --- Pilot control inputs ---
+	# pitch_input: +1 = S key / stick back = nose UP
+	var pitch_accel: float = pitch_input * pitch_power * effectiveness
+	# roll_input: user-swapped axis, -roll_input gives correct direction
+	var roll_accel: float = -roll_input * roll_power * effectiveness
+	# yaw_input: +1 = E key / stick right = nose RIGHT
+	var yaw_accel: float = yaw_input * yaw_power * effectiveness
+
+	# --- Aerodynamic stability ---
+	# Horizontal stabilizer: reduces angle of attack (nose toward velocity)
+	pitch_accel -= alpha * pitch_stability * effectiveness
+	# Vertical stabilizer (weathervane): reduces sideslip
+	yaw_accel += beta * yaw_stability * effectiveness
+	# Dihedral effect: sideslip causes corrective roll
+	roll_accel -= beta * dihedral_effect * effectiveness
+
+	# --- Angular damping (resists rotation) ---
+	# Uses fixed + speed-dependent damping so the plane is always damped,
+	# but more so at high speed (like real aircraft)
+	pitch_accel -= pitch_rate * (pitch_damping * 0.5 + pitch_damping * 0.5 * effectiveness)
+	roll_accel -= roll_rate * (roll_damping * 0.5 + roll_damping * 0.5 * effectiveness)
+	yaw_accel -= yaw_rate * (yaw_damping * 0.5 + yaw_damping * 0.5 * effectiveness)
+
+	# --- Auto-level (gentle, only when no roll input) ---
+	if absf(roll_input) < 0.1 and not is_stalling:
+		var bank_angle: float = right.dot(Vector3.UP)
+		roll_accel -= bank_angle * auto_level * effectiveness
+
+	# ========================
+	# UPDATE ROTATION RATES
+	# ========================
+	pitch_rate += pitch_accel * delta
+	roll_rate += roll_accel * delta
+	yaw_rate += yaw_accel * delta
+
+	# Clamp to realistic maximums
+	pitch_rate = clampf(pitch_rate, -1.5, 1.5)   # ~85°/s
+	roll_rate = clampf(roll_rate, -4.0, 4.0)      # ~230°/s (fighters roll fast)
+	yaw_rate = clampf(yaw_rate, -0.6, 0.6)        # ~35°/s
+
+	# ========================
+	# APPLY ROTATION (local axes)
+	# ========================
+	# Godot local axis conventions (right-hand rule):
+	#   +X rotation = pitch UP
+	#   +Z rotation = roll LEFT, so negate for roll RIGHT
+	#   +Y rotation = yaw LEFT, so negate for yaw RIGHT
+	rotate_object_local(Vector3(1, 0, 0), pitch_rate * delta)
+	rotate_object_local(Vector3(0, 0, 1), -roll_rate * delta)
+	rotate_object_local(Vector3(0, 1, 0), -yaw_rate * delta)
+
+	# Prevent floating-point drift in the basis
+	global_transform.basis = global_transform.basis.orthonormalized()
+
+	# ========================
+	# UPDATE POSITION
+	# ========================
+	global_position += velocity * delta
+
+	# ========================
+	# GROUND / GEAR
+	# ========================
+	var wl := global_transform * WHEEL_L
+	var wr := global_transform * WHEEL_R
+	var wt := global_transform * WHEEL_T
+
+	# Terrain height directly below each wheel via physics raycast
+	var space := get_world_3d().direct_space_state
+	var gnd_l := _terrain_y(wl, space)
+	var gnd_r := _terrain_y(wr, space)
+	var gnd_t := _terrain_y(wt, space)
+
+	# Penetration depth: positive means the wheel is below the terrain surface
+	var pen_l := gnd_l - wl.y
+	var pen_r := gnd_r - wr.y
+	var pen_t := gnd_t - wt.y
+	var max_pen := maxf(pen_l, maxf(pen_r, pen_t))
+
+	on_ground = max_pen > -0.05
+
+	if on_ground:
+		# Push the plane up by the deepest penetration
+		if max_pen > 0.0:
+			# 15 mph ≈ 6.7 m/s downward — high-speed ground impact is fatal
+			if velocity.y < -6.7:
+				queue_free()
+				return
+			global_position.y += max_pen
+			if velocity.y < 0.0:
+				velocity.y = 0.0
+			# Recompute after push
+			wl = global_transform * WHEEL_L
+			wr = global_transform * WHEEL_R
+			wt = global_transform * WHEEL_T
+			gnd_l = _terrain_y(wl, space)
+			gnd_r = _terrain_y(wr, space)
+			gnd_t = _terrain_y(wt, space)
+			pen_l = gnd_l - wl.y
+			pen_r = gnd_r - wr.y
+			pen_t = gnd_t - wt.y
+
+		# ---- Roll spring ----
+		# Compare each main wheel's height above its local terrain.
+		var roll_err := (wl.y - gnd_l) - (wr.y - gnd_r)
+		roll_rate += -roll_err * 25.0 * delta
+
+		# ---- Pitch spring ----
+		var main_above := ((wl.y - gnd_l) + (wr.y - gnd_r)) * 0.5
+		var tail_above := wt.y - gnd_t
+		var pitch_err  := main_above - tail_above
+		pitch_rate += -pitch_err * 8.0 * delta
+
+		# Heavy angular damping on the ground (landing gear absorbs oscillation)
+		roll_rate  *= maxf(0.0, 1.0 - 12.0 * delta)
+		pitch_rate *= maxf(0.0, 1.0 -  6.0 * delta)
+		yaw_rate   *= maxf(0.0, 1.0 -  8.0 * delta)
+
+		# Wheels constrain sideways sliding
+		var lat_vel := velocity.dot(right)
+		velocity -= right * lat_vel * minf(1.0, 15.0 * delta)
+
+		# Rolling resistance + wheel brakes.
+		# Holding throttle_down on the ground applies brakes (μ up to ~0.5).
+		var brake_mu := lerpf(0.03, 0.5, throttle_down)
+		var friction_decel := GRAVITY * brake_mu * delta
+		if velocity.length() > friction_decel:
+			velocity -= velocity.normalized() * friction_decel
+		else:
+			velocity = Vector3.ZERO
+
+## Spawns one tracer from the next gun in the rotation and advances the index.
+func _fire_next_gun() -> void:
+	var muzzle_world: Vector3 = global_transform * GUN_POSITIONS[_gun_index]
+	_gun_index = (_gun_index + 1) % GUN_POSITIONS.size()
+
+	var bullet := Node3D.new()
+	bullet.set_script(_bullet_script)
+	bullet.velocity = velocity + (-global_transform.basis.z) * BULLET_SPEED
+	get_parent().add_child(bullet)
+	bullet.global_position = muzzle_world
+
+## Returns the terrain height directly below world_pos using a downward raycast.
+## Falls back to 0 if nothing is hit (e.g. outside the terrain bounds).
+func _terrain_y(world_pos: Vector3, space: PhysicsDirectSpaceState3D) -> float:
+	var query := PhysicsRayQueryParameters3D.create(
+		Vector3(world_pos.x, 2000.0, world_pos.z),
+		Vector3(world_pos.x,  -50.0, world_pos.z))
+	query.exclude = [_hitbox_body.get_rid()]
+	var hit := space.intersect_ray(query)
+	return hit.position.y if hit else 0.0
