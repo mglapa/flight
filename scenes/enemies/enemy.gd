@@ -5,7 +5,7 @@ extends Node3D
 
 # ── Orbit constants ───────────────────────────────────────────────────────────
 const SPEED      := 67.0
-const MAX_HEALTH := 10
+const COMP_MAX   : int = 4
 
 # ── Aerodynamic model (BF-109 class) ─────────────────────────────────────────
 const AIRCRAFT_MASS  := 3200.0   # kg
@@ -40,7 +40,9 @@ const FIRE_RANGE     := 520.0   # m
 const FIRE_CONE      := 0.09    # rad ≈ 5°
 const FIRE_INTERVAL  := 0.08    # s between rounds
 
-const CHASE_GUNS : Array = [Vector3(-3.0, 0.0, -0.8), Vector3(3.0, 0.0, -0.8)]
+const CHASE_GUNS       : Array = [Vector3(-3.0, 0.0, -0.8), Vector3(3.0, 0.0, -0.8)]
+const CONVERGENCE_DIST : float = 300.0   # m — same as player (historical RAF ~250 yards)
+const GUN_SPREAD       : float = 0.004   # rad dispersion per shot
 
 # ── Orbit parameters (set before add_child) ───────────────────────────────────
 var orbit_center   : Vector3 = Vector3.ZERO
@@ -51,12 +53,19 @@ var start_angle    : float   = -1.0
 ## Assign to activate pursuit.
 var chase_target : Node3D = null
 
+## When set (and chase_target is null), fly in formation with this node.
+var formation_leader : Node3D  = null
+var formation_offset : Vector3 = Vector3.ZERO
+
 # ── Shared state ──────────────────────────────────────────────────────────────
-var health : int = MAX_HEALTH
-var _angle    : float = 0.0
-var _dead     : bool  = false
-var _dead_vel : Vector3 = Vector3.ZERO
-var _dead_age : float   = 0.0
+var comp_hp     : Dictionary = {"wing": 4, "elevator": 4, "rudder": 4, "engine": 4, "fuel_tank": 4}
+var _on_fire    : bool  = false
+var _burn_timer : float = 0.0
+var _angle        : float = 0.0
+var _was_chasing  : bool  = false
+var _dead         : bool  = false
+var _dead_vel     : Vector3 = Vector3.ZERO
+var _dead_age     : float   = 0.0
 
 # ── Aerodynamic state ─────────────────────────────────────────────────────────
 var _velocity   : Vector3 = Vector3.ZERO
@@ -72,6 +81,7 @@ var _gun_idx : int   = 0
 # ── Smoke ─────────────────────────────────────────────────────────────────────
 var _smoke_timer    : float = 9999.0
 var _smoke_interval : float = 9999.0
+var _smoke_opacity  : float = 0.0
 
 var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
@@ -82,10 +92,19 @@ var _body_rid : RID
 
 func _ready() -> void:
 	add_to_group("enemies")
+	add_to_group("enemy_fighters")   # separates fighters from bombers for chase AI
 	_build_mesh()
 	_build_collision()
 	_angle = start_angle if start_angle >= 0.0 else randf() * TAU
-	_apply_orbit()
+	if formation_leader != null and is_instance_valid(formation_leader):
+		# Snap to formation slot so there is no teleport on frame 1
+		global_position        = (formation_leader.global_position
+								  + formation_leader.global_transform.basis * formation_offset)
+		var lv = formation_leader.get("_velocity")
+		_velocity              = lv if lv != null else Vector3.ZERO
+		global_transform.basis = formation_leader.global_transform.basis
+	else:
+		_apply_orbit()
 
 func _process(delta: float) -> void:
 	if _dead:
@@ -93,15 +112,44 @@ func _process(delta: float) -> void:
 		return
 
 	if is_instance_valid(chase_target):
+		_was_chasing = true
 		_update_chase(delta)
+	elif formation_leader != null and is_instance_valid(formation_leader):
+		var slot : Vector3 = (formation_leader.global_position
+							  + formation_leader.global_transform.basis * formation_offset)
+		_update_chase(delta, slot - formation_leader.global_transform.basis.z * 15.0)
 	else:
+		formation_leader = null  # clear dead reference
+		if _was_chasing:
+			_angle = atan2(global_position.z - orbit_center.z,
+						   global_position.x - orbit_center.x)
+			_velocity = Vector3.ZERO
+			_was_chasing = false
 		_angle += (SPEED / orbit_radius) * delta
 		_apply_orbit()
 
 	_smoke_timer -= delta
 	if _smoke_timer <= 0.0:
 		_smoke_timer = _smoke_interval
-		_spawn_smoke_puff(false)
+		_spawn_smoke_puff(false, _smoke_opacity)
+
+	if _on_fire and not _dead:
+		_burn_timer += delta
+		if _burn_timer >= 1.0:
+			_burn_timer -= 1.0
+			var fire_comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
+			var fc : String = fire_comps.pick_random()
+			if comp_hp[fc] > 0:
+				comp_hp[fc] -= 1
+			var total_hp := 0
+			for v in comp_hp.values():
+				total_hp += v
+			if total_hp <= 0:
+				_start_falling()
+				return
+			_smoke_opacity  = 1.0
+			_smoke_interval = 0.05
+			_smoke_timer    = minf(_smoke_timer, 0.05)
 
 # ── Orbit ─────────────────────────────────────────────────────────────────────
 
@@ -118,10 +166,15 @@ func _apply_orbit() -> void:
 
 # ── Chase AI with aerodynamic flight model ────────────────────────────────────
 
-func _update_chase(delta: float) -> void:
-	# Seed velocity from orbit tangent on first chase frame
+func _update_chase(delta: float, escort_slot: Vector3 = Vector3.INF) -> void:
+	var is_escort : bool = escort_slot != Vector3.INF
+	# Seed velocity on first frame
 	if _velocity == Vector3.ZERO:
-		_velocity = Vector3(-sin(_angle), 0.0, cos(_angle)) * TARGET_SPEED
+		if is_escort and formation_leader != null and is_instance_valid(formation_leader):
+			var lv = formation_leader.get("_velocity")
+			_velocity = lv if lv != null else Vector3(0.0, 0.0, TARGET_SPEED)
+		else:
+			_velocity = Vector3(-sin(_angle), 0.0, cos(_angle)) * TARGET_SPEED
 
 	var fwd   : Vector3 = -global_transform.basis.z
 	var up    : Vector3 =  global_transform.basis.y
@@ -154,7 +207,13 @@ func _update_chase(delta: float) -> void:
 		var cl_at_stall : float = CL_0 + CL_SLOPE * STALL_ALPHA * signf(alpha)
 		var excess : float = absf(alpha) - STALL_ALPHA
 		cl = cl_at_stall * maxf(1.0 - excess * 2.0, 0.2)
-	var lift_force : Vector3 = up * qS * cl
+	var wing_dmg  : float = float(COMP_MAX - comp_hp["wing"])     / float(COMP_MAX)
+	var elev_dmg  : float = float(COMP_MAX - comp_hp["elevator"]) / float(COMP_MAX)
+	var rudd_dmg  : float = float(COMP_MAX - comp_hp["rudder"])   / float(COMP_MAX)
+	var eng_dmg   : float = float(COMP_MAX - comp_hp["engine"])   / float(COMP_MAX)
+	var lift_mult     : float = 1.0 - wing_dmg * 0.90
+	var thrust_factor : float = 1.0 - eng_dmg
+	var lift_force : Vector3 = up * qS * cl * lift_mult
 
 	# ── Drag ──────────────────────────────────────────────────────────────────
 	var cd : float = CD_0 + (cl * cl) / (PI * _aspect_ratio * OSWALD)
@@ -168,7 +227,7 @@ func _update_chase(delta: float) -> void:
 	# ── Auto-throttle: push hard when slow, ease back when fast ───────────────
 	var throttle_target := 1.0 if speed < TARGET_SPEED else 0.65
 	_throttle = clampf(lerpf(_throttle, throttle_target, 1.5 * delta), 0.0, 1.0)
-	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle
+	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle * thrust_factor
 
 	# ── Gravity ───────────────────────────────────────────────────────────────
 	var weight : Vector3 = Vector3.DOWN * AIRCRAFT_MASS * GRAVITY
@@ -194,6 +253,11 @@ func _update_chase(delta: float) -> void:
 		# Pull up hard, level wings
 		ai_pitch =  1.0
 		ai_roll  =  0.0
+	elif is_escort:
+		# Fly directly toward the assigned formation slot
+		var goal_dir : Vector3 = (escort_slot - global_position).normalized()
+		ai_roll  = -clampf(goal_dir.dot(right) * 3.0, -1.0, 1.0)
+		ai_pitch = clampf(goal_dir.dot(up) * 2.5 + 0.05, -1.0, 1.0)
 	else:
 		var target_pos : Vector3 = chase_target.global_position
 		var target_fwd : Vector3 = -chase_target.global_transform.basis.z
@@ -226,14 +290,20 @@ func _update_chase(delta: float) -> void:
 		var over : float = (alpha - alpha_warn) / (STALL_ALPHA - alpha_warn)
 		ai_pitch *= maxf(0.0, 1.0 - over)
 
+	# ── Damage-scaled control authority ──────────────────────────────────────
+	var eff_pitch_power     := PITCH_POWER     * (1.0 - elev_dmg)
+	var eff_pitch_stability := PITCH_STABILITY * (1.0 - elev_dmg)
+	var eff_roll_power      := ROLL_POWER      * (1.0 - wing_dmg)
+	var eff_yaw_stability   := YAW_STABILITY   * (1.0 - rudd_dmg)
+
 	# ── Angular accelerations — identical to player ───────────────────────────
-	var pitch_accel : float =  ai_pitch * PITCH_POWER * effectiveness
-	var roll_accel  : float = -ai_roll  * ROLL_POWER  * effectiveness
+	var pitch_accel : float =  ai_pitch * eff_pitch_power * effectiveness
+	var roll_accel  : float = -ai_roll  * eff_roll_power  * effectiveness
 	var yaw_accel   : float = 0.0
 
 	# Aerodynamic stability (same as player)
-	pitch_accel -= alpha * PITCH_STABILITY * effectiveness
-	yaw_accel   += beta  * YAW_STABILITY   * effectiveness
+	pitch_accel -= alpha * eff_pitch_stability * effectiveness
+	yaw_accel   += beta  * eff_yaw_stability   * effectiveness
 	roll_accel  -= beta  * DIHEDRAL_EFFECT * effectiveness
 
 	# Angular damping (same as player)
@@ -263,34 +333,46 @@ func _update_chase(delta: float) -> void:
 		_start_falling()
 		return
 
-	# ── Shoot ────────────────────────────────────────────────────────────────
-	_fire_cd -= delta
-	if _fire_cd <= 0.0 and not too_low:
-		var to_tgt   : Vector3 = chase_target.global_position - global_position
-		var angle_to : float   = fwd.angle_to(to_tgt.normalized())
-		if to_tgt.length() < FIRE_RANGE and angle_to < FIRE_CONE:
-			_fire_enemy_gun()
-			_fire_cd = FIRE_INTERVAL
+	# ── Shoot (only when actively chasing a target, not in escort mode) ─────
+	if not is_escort:
+		_fire_cd -= delta
+		if _fire_cd <= 0.0 and not too_low:
+			var to_tgt   : Vector3 = chase_target.global_position - global_position
+			var angle_to : float   = fwd.angle_to(to_tgt.normalized())
+			if to_tgt.length() < FIRE_RANGE and angle_to < FIRE_CONE:
+				_fire_enemy_gun()
+				_fire_cd = FIRE_INTERVAL
 
 # ── Damage ────────────────────────────────────────────────────────────────────
 
 func take_hit(hit_pos: Vector3) -> void:
 	if _dead:
 		return
-	health -= 1
 
 	var flash := Node3D.new()
 	flash.set_script(_hit_flash_script)
 	get_parent().add_child(flash)
 	flash.global_position = hit_pos
 
-	if health <= 3:
-		_smoke_interval = 0.12
-	elif health <= 6:
-		_smoke_interval = 0.40
+	var comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
+	var c : String = comps.pick_random()
+	if comp_hp[c] > 0:
+		comp_hp[c] -= 1
 
-	if health <= 0:
+	if c == "fuel_tank" and not _on_fire and randf() < 0.01:
+		_on_fire = true
+
+	var total_hp := 0
+	for v in comp_hp.values():
+		total_hp += v
+	if total_hp <= 0:
 		_start_falling()
+		return
+
+	var damage_ratio := 1.0 - float(total_hp) / float(COMP_MAX * 5)
+	_smoke_opacity  = damage_ratio
+	_smoke_interval = lerpf(2.0, 0.08, damage_ratio)
+	_smoke_timer    = minf(_smoke_timer, _smoke_interval)
 
 func _start_falling() -> void:
 	_dead = true
@@ -315,11 +397,22 @@ func _update_falling(delta: float) -> void:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 func _fire_enemy_gun() -> void:
-	var muzzle : Vector3 = global_transform * CHASE_GUNS[_gun_idx]
+	var gun_local : Vector3 = CHASE_GUNS[_gun_idx]
+	var muzzle    : Vector3 = global_transform * gun_local
 	_gun_idx = (_gun_idx + 1) % CHASE_GUNS.size()
+
+	# Toe guns inward to converge at CONVERGENCE_DIST.
+	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var aim_world : Vector3 = global_transform.basis * aim_local
+
+	# Random dispersion so bursts aren't laser-precise.
+	aim_world = (aim_world
+		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
+		+ global_transform.basis.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
+
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
-	bullet.velocity = _velocity + (-global_transform.basis.z) * 800.0
+	bullet.velocity = _velocity + aim_world * 800.0
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle
 
@@ -328,15 +421,15 @@ func _terrain_y(world_pos: Vector3) -> float:
 	var query := PhysicsRayQueryParameters3D.create(
 		Vector3(world_pos.x, 2000.0, world_pos.z),
 		Vector3(world_pos.x,  -50.0, world_pos.z))
-	if _body_rid.is_valid():
-		query.exclude = [_body_rid]
+	query.collision_mask = 1  # terrain and water only — never hits plane hitboxes (layer 2)
 	var hit := space.intersect_ray(query)
 	return hit.position.y if hit else 0.0
 
-func _spawn_smoke_puff(is_dark: bool) -> void:
+func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 	var puff := Node3D.new()
 	puff.set_script(_smoke_puff_script)
-	puff.dark = is_dark
+	puff.dark    = is_dark
+	puff.opacity = puff_opacity
 	get_parent().add_child(puff)
 	puff.global_position = global_position + Vector3(0, 0.4, 0)
 
@@ -380,5 +473,8 @@ func _build_collision() -> void:
 	box.size = Vector3(12.0, 1.5, 10.0)
 	col.shape = box
 	body.add_child(col)
+	# Layer 2: bullets (mask=3) hit it; terrain raycasts (mask=1) do not
+	body.collision_layer = 2
+	body.collision_mask  = 2
 	add_child(body)
 	_body_rid = body.get_rid()

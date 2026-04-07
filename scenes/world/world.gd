@@ -46,7 +46,8 @@ func _process(delta: float) -> void:
 		return
 	var player : Node3D = players[0]
 
-	var enemies := get_tree().get_nodes_in_group("enemies")
+	# Only fighters chase — bombers have their own defensive gunner AI
+	var enemies := get_tree().get_nodes_in_group("enemy_fighters")
 	var closest  : Node3D = null
 	var best_d   : float  = INF
 	for e in enemies:
@@ -248,6 +249,18 @@ func _create_sea() -> void:
 	mat.metallic_specular = 0.5
 	mesh_inst.material_override = mat
 
+	# Collision surface at y=0.8 so planes crash when they hit the water.
+	# Box top face sits exactly at the visual water surface.
+	var sea_body := StaticBody3D.new()
+	var sea_col  := CollisionShape3D.new()
+	var sea_box  := BoxShape3D.new()
+	sea_box.size = Vector3(HMAP_WORLD + 20000.0, 4.0, HMAP_WORLD + 20000.0)
+	sea_col.shape = sea_box
+	sea_body.add_child(sea_col)
+	# Center 2 m below the surface so the top face lands exactly at y=0.8
+	sea_body.position = Vector3(0.0, -2.0, 0.0)
+	mesh_inst.add_child(sea_body)
+
 	add_child(mesh_inst)
 
 func _create_scenery() -> void:
@@ -334,28 +347,51 @@ func _spawn_building(pos: Vector3, rng: RandomNumberGenerator) -> void:
 	add_child(building)
 
 func _spawn_enemies() -> void:
-	var enemy_script := load("res://scenes/enemies/enemy.gd")
+	var enemy_script  := load("res://scenes/enemies/enemy.gd")
+	var bomber_script := load("res://scenes/enemies/bomber.gd")
 
-	const ALT_5000FT := 1524.0
-	const HEAD_ON_RADIUS := 5000.0
-	var head_on := Node3D.new()
-	head_on.set_script(enemy_script)
-	head_on.orbit_center   = Vector3(-HEAD_ON_RADIUS, 0.0, -1000.0)
-	head_on.orbit_radius   = HEAD_ON_RADIUS
-	head_on.orbit_altitude = ALT_5000FT
-	head_on.start_angle    = 0.0
-	add_child(head_on)
+	# ── He 111 V formation + 2 fighter escorts ────────────────────────────────
+	# Player spawns at (0, 4572, 1000) facing -Z.
+	# Formation starts 3 km ahead of the player (at z = -2000) and flies
+	# straight toward the player in the +Z direction.
+	const FORM_ALT  := 4572.0    # 15,000 ft — same as player spawn altitude
+	const FORM_START_Z := -2000.0  # 3 km in front of player (player is at z=1000)
 
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 77
-	for i in range(5):
-		var e := Node3D.new()
-		e.set_script(enemy_script)
-		e.orbit_center   = Vector3(rng.randf_range(-3000.0, 3000.0), 0.0,
-								   rng.randf_range(-3000.0, 3000.0))
-		e.orbit_radius   = rng.randf_range(600.0, 1800.0)
-		e.orbit_altitude = rng.randf_range(914.0, 2438.0)
-		add_child(e)
+	# Lead bomber drives the whole formation
+	var lead_bomber := Node3D.new()
+	lead_bomber.set_script(bomber_script)
+	lead_bomber.start_position   = Vector3(0.0, FORM_ALT, FORM_START_Z)
+	lead_bomber.flight_direction = Vector3(0, 0, 1)   # +Z = toward player
+	add_child(lead_bomber)
+
+	# Four wingmen at V-formation offsets in the leader's local space.
+	# Leader's local +Z = rearward (nose points in -Z local = +Z world).
+	# Each arm steps 120 m laterally and 120 m rearward per position.
+	var bomb_offsets : Array = [
+		Vector3( 120, 0,  120),   # Right 1
+		Vector3(-120, 0,  120),   # Left 1
+		Vector3( 240, 0,  240),   # Right 2
+		Vector3(-240, 0,  240),   # Left 2
+	]
+	for b_offset in bomb_offsets:
+		var b := Node3D.new()
+		b.set_script(bomber_script)
+		b.flight_direction = Vector3(0, 0, 1)
+		b.formation_leader = lead_bomber
+		b.formation_offset = b_offset
+		add_child(b)
+
+	# Two fighter escorts flanking the outer wingmen, using formation following
+	var escort_offsets : Array = [
+		Vector3( 400, 0,  120),   # Right escort — outside Right 2
+		Vector3(-400, 0,  120),   # Left  escort — outside Left 2
+	]
+	for e_offset in escort_offsets:
+		var f := Node3D.new()
+		f.set_script(enemy_script)
+		f.formation_leader = lead_bomber
+		f.formation_offset = e_offset
+		add_child(f)
 
 func _create_runway() -> void:
 	var ry := PLATEAU_HEIGHT   # runway sits on the plateau

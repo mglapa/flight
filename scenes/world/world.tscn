@@ -1,4 +1,4 @@
-[gd_scene load_steps=5 format=3 uid="uid://eq7dw3td68nrs"]
+[gd_scene format=3 uid="uid://vsic1v4m1r01"]
 
 [ext_resource type="Script" uid="uid://cjubtlsb6heg2" path="res://scenes/world/world.gd" id="1"]
 
@@ -19,17 +19,17 @@ tonemap_white = 1.2
 ssao_enabled = true
 fog_enabled = true
 fog_light_color = Color(0.35, 0.55, 0.82, 1)
-fog_density = 0.00004
+fog_density = 0.0
 
-[node name="World" type="Node3D"]
+[node name="World" type="Node3D" unique_id=406858596]
 script = ExtResource("1")
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=198530223]
 environment = SubResource("Environment_1")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=1918330046]
 transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 100, 0)
-light_color = Color(1.0, 0.95, 0.85, 1)
+light_color = Color(1, 0.95, 0.85, 1)
 light_energy = 1.3
 shadow_enabled = true
 directional_shadow_max_distance = 500.0

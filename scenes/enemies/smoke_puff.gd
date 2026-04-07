@@ -5,6 +5,8 @@ const DURATION := 2.2
 
 ## Set to true for thick black smoke (heavy damage / falling).
 var dark: bool = false
+## Opacity multiplier (0.0–1.0). Scale this with damage ratio for gradual smoke.
+var opacity: float = 1.0
 
 var _age: float = 0.0
 var _vel: Vector3
@@ -18,7 +20,8 @@ func _ready() -> void:
 	mesh_inst.mesh = sphere
 
 	_mat = StandardMaterial3D.new()
-	_mat.albedo_color = Color(0.12, 0.12, 0.12, 0.85) if dark else Color(0.45, 0.42, 0.40, 0.6)
+	var base_alpha := (0.85 if dark else 0.6) * opacity
+	_mat.albedo_color = Color(0.12, 0.12, 0.12, base_alpha) if dark else Color(0.45, 0.42, 0.40, base_alpha)
 	_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mesh_inst.material_override = _mat
 	add_child(mesh_inst)
@@ -34,4 +37,4 @@ func _process(delta: float) -> void:
 	global_position += _vel * delta
 	var s := 1.0 + t * 4.0
 	scale = Vector3(s, s, s)
-	_mat.albedo_color.a = (0.85 if dark else 0.6) * (1.0 - t)
+	_mat.albedo_color.a = (0.85 if dark else 0.6) * opacity * (1.0 - t)

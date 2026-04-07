@@ -10,8 +10,8 @@ func _ready() -> void:
 	hud.plane = plane
 	hud.camera = camera
 
-	# 5000 ft = 1524 m.  Player at +Z, facing -Z toward the head-on enemy.
-	plane.position = Vector3(0, 1524, 1000)
+	# 15,000 ft = 4572 m.  Player faces -Z; formation is at z = -2000 flying +Z.
+	plane.position = Vector3(0, 4572, 1000)
 
 	# Snap the camera to the correct starting position so it doesn't lerp
 	# up from the ground on the first frames.

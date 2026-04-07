@@ -28,7 +28,7 @@ extends Node3D
 
 @export_group("Stability & Damping")
 ## Pitch stability — tail pushes nose toward velocity (reduces AoA)
-@export var pitch_stability: float = 1.5
+@export var pitch_stability: float = 1.0
 ## Yaw stability — vertical tail fin keeps nose aligned with velocity
 @export var yaw_stability: float = 5.0
 ## Dihedral effect — sideslip causes corrective roll
@@ -58,8 +58,10 @@ const GUN_POSITIONS: Array = [
 	Vector3( 3.0, 0.0, -0.8),   # right inner
 	Vector3( 4.5, 0.0, -0.8),   # right outer
 ]
-const BULLET_SPEED  := 800.0   # m/s — .303 Browning muzzle velocity
-const FIRE_INTERVAL := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
+const BULLET_SPEED      := 800.0   # m/s — .303 Browning muzzle velocity
+const FIRE_INTERVAL     := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
+const CONVERGENCE_DIST  := 300.0   # m — historical RAF ~250 yards (229 m) standard
+const GUN_SPREAD        := 0.004   # rad — ~4 mil dispersion per shot
 
 var _gun_index: int  = 0
 var _fire_timer: float = 0.0
@@ -94,9 +96,32 @@ var g_force: float = 1.0
 var on_ground: bool = false
 var airspeed_display: float = 0.0  # forward component only, for HUD
 
-var player_health : int = 10
+const COMP_MAX : int = 4
+var comp_hp    : Dictionary = {"wing": 4, "elevator": 4, "rudder": 4, "engine": 4, "fuel_tank": 4}
+var _on_fire   : bool  = false
+var _burn_timer: float = 0.0
 
 @onready var _hitbox_body : StaticBody3D = $Hitbox
+
+# Smoke emission
+var _smoke_timer    : float = 9999.0
+var _smoke_interval : float = 9999.0
+var _smoke_opacity  : float = 0.0
+var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
+
+# -- Audio --
+## Drag a looping engine .wav/.ogg onto this in the Inspector
+@export var engine_sound : AudioStream
+
+var _audio_player : AudioStreamPlayer
+
+# Gun audio — procedurally generated
+const _GUN_MIX_RATE  := 22050.0
+const _SHOT_SAMPLES  := 1985       # 90 ms worth of samples at 22050 Hz
+
+var _gun_player   : AudioStreamPlayer
+var _gun_playback : AudioStreamGeneratorPlayback
+var _shot_ages    : Array[int] = []   # age in samples of each active shot
 
 func _ready() -> void:
 	add_to_group("player")
@@ -104,17 +129,111 @@ func _ready() -> void:
 	throttle = 0.7
 	# Start at ~290 km/h, airborne
 	velocity = -global_transform.basis.z * 80.0
+	# Put the hitbox on layer 2 so terrain/water raycasts (mask=1) never hit it
+	_hitbox_body.collision_layer = 2
+	_hitbox_body.collision_mask  = 2
+	_setup_engine_audio()
+	_setup_gun_audio()
+
+func _setup_gun_audio() -> void:
+	var gen := AudioStreamGenerator.new()
+	gen.mix_rate      = _GUN_MIX_RATE
+	gen.buffer_length = 0.05
+
+	_gun_player = AudioStreamPlayer.new()
+	_gun_player.stream    = gen
+	_gun_player.volume_db = 4.0
+	add_child(_gun_player)
+	_gun_player.play()
+	_gun_playback = _gun_player.get_stream_playback() as AudioStreamGeneratorPlayback
+
+func _setup_engine_audio() -> void:
+	if not engine_sound:
+		return
+	_audio_player = AudioStreamPlayer.new()
+	_audio_player.stream    = engine_sound
+	_audio_player.volume_db = -10.0
+	add_child(_audio_player)
+	_audio_player.play()
+
+func _process(delta: float) -> void:
+	if _audio_player:
+		_audio_player.pitch_scale = lerpf(0.5, 1.8, throttle)
+		_audio_player.volume_db   = lerpf(-18.0, -6.0, throttle)
+	_push_gun_audio()
+
+	# Smoke emission — only when damaged
+	if _smoke_interval < 9999.0:
+		_smoke_timer -= delta
+		if _smoke_timer <= 0.0:
+			_smoke_timer = _smoke_interval
+			_spawn_smoke_puff()
+
+	# Fire — drains one random component HP per second until the plane is dead
+	if _on_fire:
+		_burn_timer += delta
+		if _burn_timer >= 1.0:
+			_burn_timer -= 1.0
+			var fire_comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
+			var fc : String = fire_comps.pick_random()
+			if comp_hp[fc] > 0:
+				comp_hp[fc] -= 1
+			_smoke_opacity  = 1.0
+			_smoke_interval = 0.05
+			_smoke_timer    = minf(_smoke_timer, 0.05)
+
+func _push_gun_audio() -> void:
+	if not _gun_playback:
+		return
+	var to_fill := _gun_playback.get_frames_available()
+	for _i in range(to_fill):
+		var sample := 0.0
+		for j in range(_shot_ages.size() - 1, -1, -1):
+			var t : float = float(_shot_ages[j]) / _GUN_MIX_RATE
+			# Muzzle crack: white noise, sharp 2 ms decay
+			sample += (randf() * 2.0 - 1.0) * exp(-t * 500.0) * 4.0
+			# Pressure boom: 90 Hz sine, 30 ms decay
+			sample += sin(TAU * 90.0  * t) * exp(-t * 33.0) * 3.0
+			# Barrel ring: 500 Hz sine, 15 ms decay
+			sample += sin(TAU * 500.0 * t) * exp(-t * 100.0) * 1.2
+			_shot_ages[j] += 1
+			if _shot_ages[j] >= _SHOT_SAMPLES:
+				_shot_ages.remove_at(j)
+		# Scale down; slight clipping on the crack attack is intentional
+		_gun_playback.push_frame(Vector2(clampf(sample * 0.3, -1.0, 1.0),
+										 clampf(sample * 0.3, -1.0, 1.0)))
 
 func take_hit(_hit_pos: Vector3) -> void:
-	player_health -= 1
-	if player_health <= 0:
-		queue_free()
+	var comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
+	var c : String = comps.pick_random()
+	if comp_hp[c] > 0:
+		comp_hp[c] -= 1
+
+	if c == "fuel_tank" and not _on_fire and randf() < 0.01:
+		_on_fire = true
+
+	var total_hp := 0
+	for v in comp_hp.values():
+		total_hp += v
+	var damage_ratio := 1.0 - float(total_hp) / float(COMP_MAX * 5)
+	_smoke_opacity  = damage_ratio
+	_smoke_interval = lerpf(2.0, 0.08, damage_ratio)
+	_smoke_timer    = minf(_smoke_timer, _smoke_interval)
+
+func _spawn_smoke_puff() -> void:
+	var puff := Node3D.new()
+	puff.set_script(_smoke_puff_script)
+	puff.dark    = true
+	puff.opacity = _smoke_opacity
+	get_parent().add_child(puff)
+	puff.global_position = global_position + Vector3(0.0, -0.5, 0.0)
 
 func _physics_process(delta: float) -> void:
 	# ========================
 	# INPUT
 	# ========================
-	var pitch_input := Input.get_axis("pitch_up", "pitch_down")
+	var stick_sensitivity: float = 0.5
+	var pitch_input := Input.get_axis("pitch_up", "pitch_down") * stick_sensitivity
 	var roll_input := Input.get_axis("roll_right", "roll_left")
 	var yaw_input := Input.get_axis("yaw_left", "yaw_right")
 	var throttle_up := Input.get_action_strength("throttle_up")
@@ -186,12 +305,22 @@ func _physics_process(delta: float) -> void:
 
 	is_stalling = absf(alpha) > stall_alpha and current_speed > 5.0
 
-	var lift_force: Vector3 = up * qS * cl
+	# Per-component damage factors (0.0 = healthy, 1.0 = destroyed)
+	var wing_dmg  : float = float(COMP_MAX - comp_hp["wing"])     / float(COMP_MAX)
+	var elev_dmg  : float = float(COMP_MAX - comp_hp["elevator"]) / float(COMP_MAX)
+	var rudd_dmg  : float = float(COMP_MAX - comp_hp["rudder"])   / float(COMP_MAX)
+	var eng_dmg   : float = float(COMP_MAX - comp_hp["engine"])   / float(COMP_MAX)
+	var lift_mult     : float = 1.0 - wing_dmg * 0.90    # wing: 10 % lift remains at 0 HP
+	var thrust_factor : float = 1.0 - eng_dmg            # engine: thrust → 0 when gone
+	var lift_force: Vector3 = up * qS * cl * lift_mult
 
 	# ========================
 	# DRAG (parasitic + induced)
 	# ========================
 	var cd: float = cd_0 + (cl * cl) / (PI * aspect_ratio * oswald)
+	# Post-stall: separated flow produces flat-plate drag far beyond polar prediction
+	if absf(alpha) > stall_alpha:
+		cd += (absf(alpha) - stall_alpha) * 1.8
 	var drag_force: Vector3 = Vector3.ZERO
 	if current_speed > 1.0:
 		drag_force = -velocity.normalized() * qS * cd
@@ -204,7 +333,7 @@ func _physics_process(delta: float) -> void:
 	# ========================
 	# THRUST
 	# ========================
-	var thrust_force: Vector3 = fwd * max_thrust * throttle
+	var thrust_force: Vector3 = fwd * max_thrust * throttle * thrust_factor
 
 	# ========================
 	# GRAVITY
@@ -227,19 +356,26 @@ func _physics_process(delta: float) -> void:
 	# ANGULAR ACCELERATIONS
 	# ========================
 
+	# Damage-scaled control authority
+	var eff_pitch_power     := pitch_power     * (1.0 - elev_dmg)
+	var eff_pitch_stability := pitch_stability * (1.0 - elev_dmg)
+	var eff_roll_power      := roll_power      * (1.0 - wing_dmg)
+	var eff_yaw_power       := yaw_power       * (1.0 - rudd_dmg)
+	var eff_yaw_stability   := yaw_stability   * (1.0 - rudd_dmg)
+
 	# --- Pilot control inputs ---
 	# pitch_input: +1 = S key / stick back = nose UP
-	var pitch_accel: float = pitch_input * pitch_power * effectiveness
+	var pitch_accel: float = pitch_input * eff_pitch_power * effectiveness
 	# roll_input: user-swapped axis, -roll_input gives correct direction
-	var roll_accel: float = -roll_input * roll_power * effectiveness
+	var roll_accel: float = -roll_input * eff_roll_power * effectiveness
 	# yaw_input: +1 = E key / stick right = nose RIGHT
-	var yaw_accel: float = yaw_input * yaw_power * effectiveness
+	var yaw_accel: float = yaw_input * eff_yaw_power * effectiveness
 
 	# --- Aerodynamic stability ---
 	# Horizontal stabilizer: reduces angle of attack (nose toward velocity)
-	pitch_accel -= alpha * pitch_stability * effectiveness
+	pitch_accel -= alpha * eff_pitch_stability * effectiveness
 	# Vertical stabilizer (weathervane): reduces sideslip
-	yaw_accel += beta * yaw_stability * effectiveness
+	yaw_accel += beta * eff_yaw_stability * effectiveness
 	# Dihedral effect: sideslip causes corrective roll
 	roll_accel -= beta * dihedral_effect * effectiveness
 
@@ -254,6 +390,40 @@ func _physics_process(delta: float) -> void:
 	if absf(roll_input) < 0.1 and not is_stalling:
 		var bank_angle: float = right.dot(Vector3.UP)
 		roll_accel -= bank_angle * auto_level * effectiveness
+
+	# --- Stall aerodynamics ---
+	# Four coupled effects that make a stall feel like a real departure:
+	if is_stalling:
+		var stall_over : float = clampf((absf(alpha) - stall_alpha) / stall_alpha, 0.0, 1.5)
+
+		# 1. Elevator authority bleeds away — separated flow over the tailplane
+		#    means the pilot can no longer hold the nose up.
+		pitch_accel -= (pitch_input * eff_pitch_power * effectiveness) \
+					   * clampf(stall_over * 0.75, 0.0, 0.75)
+
+		# 2. Nose-break: aerodynamic centre moves forward past stall,
+		#    creating a strong pitch-down moment even at low airspeed.
+		#    maxf(effectiveness, 0.35) ensures it fires when nearly stopped.
+		pitch_accel -= signf(alpha) * stall_over \
+					   * eff_pitch_stability * 5.0 * maxf(effectiveness, 0.35)
+
+		# 3. Autorotation: any pre-existing roll rate amplifies (spin entry).
+		#    A wings-level symmetric stall just pitches down; a stall in a
+		#    bank or turn will depart and roll hard.
+		roll_accel += roll_rate * stall_over * 3.5
+
+		# 4. Aileron authority also degrades — surfaces in separated flow.
+		roll_accel -= (-roll_input * eff_roll_power * effectiveness) \
+					  * clampf(stall_over * 0.70, 0.0, 0.70)
+
+		# 5. Small airframe asymmetry: prevents a perfectly symmetric stall
+		#    from being infinitely holdable; gives a natural wing-drop bias
+		#    that varies with position so it isn't the same every time.
+		roll_accel += sin(global_position.x * 0.01 + global_position.z * 0.007) \
+					  * 0.25 * stall_over
+
+		# 6. Adverse yaw from roll rate in stall — couples into spin entry.
+		yaw_accel -= roll_rate * stall_over * 1.5
 
 	# ========================
 	# UPDATE ROTATION RATES
@@ -359,14 +529,28 @@ func _physics_process(delta: float) -> void:
 
 ## Spawns one tracer from the next gun in the rotation and advances the index.
 func _fire_next_gun() -> void:
-	var muzzle_world: Vector3 = global_transform * GUN_POSITIONS[_gun_index]
+	var gun_local    : Vector3 = GUN_POSITIONS[_gun_index]
+	var muzzle_world : Vector3 = global_transform * gun_local
 	_gun_index = (_gun_index + 1) % GUN_POSITIONS.size()
+
+	# Toe each gun inward so bullets converge at CONVERGENCE_DIST ahead.
+	# gun_local.x is the lateral offset; aim at (0, 0, -CONVERGENCE_DIST) in local space.
+	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var aim_world : Vector3 = global_transform.basis * aim_local
+
+	# Add a small random dispersion so bursts spread naturally.
+	aim_world = (aim_world
+		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
+		+ global_transform.basis.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
 
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
-	bullet.velocity = velocity + (-global_transform.basis.z) * BULLET_SPEED
+	bullet.velocity = velocity + aim_world * BULLET_SPEED
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle_world
+
+	if _gun_playback:
+		_shot_ages.append(0)
 
 ## Returns the terrain height directly below world_pos using a downward raycast.
 ## Falls back to 0 if nothing is hit (e.g. outside the terrain bounds).
@@ -374,6 +558,6 @@ func _terrain_y(world_pos: Vector3, space: PhysicsDirectSpaceState3D) -> float:
 	var query := PhysicsRayQueryParameters3D.create(
 		Vector3(world_pos.x, 2000.0, world_pos.z),
 		Vector3(world_pos.x,  -50.0, world_pos.z))
-	query.exclude = [_hitbox_body.get_rid()]
+	query.collision_mask = 1  # terrain and water only — never hits plane hitboxes (layer 2)
 	var hit := space.intersect_ray(query)
 	return hit.position.y if hit else 0.0

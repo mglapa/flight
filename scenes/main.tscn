@@ -1,4 +1,4 @@
-[gd_scene load_steps=6 format=3 uid="uid://dw8ry5jtf6ap1"]
+[gd_scene format=3 uid="uid://dw8ry5jtf6ap1"]
 
 [ext_resource type="Script" uid="uid://cvfe0fmmt1cci" path="res://scenes/main.gd" id="1"]
 [ext_resource type="PackedScene" uid="uid://vsic1v4m1r01" path="res://scenes/world/world.tscn" id="2"]
@@ -16,5 +16,10 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 165, -50)
 
 [node name="ChaseCamera" parent="." unique_id=121026052 instance=ExtResource("4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 169, -38)
+far = 30000.0
+follow_distance = 20.0
+follow_height = 5.0
+position_speed = 15.0
+rotation_speed = 15.0
 
 [node name="HUD" parent="." unique_id=1827228673 instance=ExtResource("5")]

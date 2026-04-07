@@ -61,13 +61,14 @@ func _draw_instruments() -> void:
 	var cx        := vp.x * 0.5
 	var cy        := vp.y - 120.0 * _hud_scale
 
-	_draw_radar(   Vector2(cx - gap, cy), r)
-	_draw_attitude(Vector2(cx,       cy), r, pitch, roll)
-	_draw_compass( Vector2(cx + gap, cy), r, heading)
+	_draw_radar(      Vector2(cx - gap, cy), r)
+	_draw_attitude(   Vector2(cx,       cy), r, pitch, roll)
+	_draw_compass(    Vector2(cx + gap, cy), r, heading)
 	_draw_crosshair()
+	_draw_health_bar( vp)
 
 func _draw_radar(center: Vector2, radius: float) -> void:
-	const RANGE := 5000.0
+	const RANGE := 2000.0
 	var s := _hud_scale
 
 	var font    := ThemeDB.fallback_font
@@ -113,6 +114,68 @@ func _draw_radar(center: Vector2, radius: float) -> void:
 	draw_layer.draw_arc(center, radius, 0.0, TAU, 64, Color(0.0, 0.55, 0.0, 0.85), maxf(1.0, 2.0 * s))
 	draw_layer.draw_string(font, center + Vector2(-16.0 * s, -radius - 10.0 * s),
 		"RDR", HORIZONTAL_ALIGNMENT_LEFT, -1, int(14 * s), Color(0.0, 0.85, 0.0, 0.7))
+
+func _draw_health_bar(vp: Vector2) -> void:
+	if not plane or not "comp_hp" in plane:
+		return
+	var s    := _hud_scale
+	var font := ThemeDB.fallback_font
+
+	var comp_hp  : Dictionary = plane.comp_hp
+	var comp_max : int        = plane.get("COMP_MAX") if "COMP_MAX" in plane else 4
+	var on_fire  : bool       = plane.get("_on_fire") if "_on_fire" in plane else false
+
+	const KEYS   := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
+	const LABELS := ["WING", "ELEV", "RUDR", "ENGN", "FUEL"]
+	# Base colours for each component at full health
+	const COLORS := [
+		Color(0.20, 0.85, 0.20),   # wing    — green
+		Color(0.30, 0.60, 1.00),   # elevator — blue
+		Color(1.00, 0.80, 0.20),   # rudder  — amber
+		Color(1.00, 0.45, 0.10),   # engine  — orange
+		Color(0.90, 0.90, 0.90),   # fuel    — white
+	]
+
+	# Layout — horizontally centred between the left text block and the radar
+	var lbl_w   := 36.0 * s
+	var bar_w   := 160.0 * s
+	var bar_h   := 10.0 * s
+	var row_gap :=  4.0 * s
+	var margin  := 24.0 * s
+	var radar_left := vp.x * 0.5 - 400.0 * s - 80.0 * s
+	var text_right := 260.0 * s
+	var bx := (text_right + radar_left) * 0.5 - (lbl_w + bar_w) * 0.5
+
+	var total_h := bar_h * KEYS.size() + row_gap * (KEYS.size() - 1)
+	var by_top  := vp.y - margin - total_h
+
+	for i in range(KEYS.size()):
+		var key   : String = KEYS[i]
+		var hp    : int    = comp_hp.get(key, comp_max)
+		var ratio : float  = float(hp) / float(comp_max)
+		var row_y : float  = by_top + float(i) * (bar_h + row_gap)
+
+		# Label — fuel label turns red when on fire
+		var lbl_col := Color(0.85, 0.85, 0.85, 0.80)
+		if key == "fuel_tank" and on_fire:
+			lbl_col = Color(1.0, 0.25, 0.10, 1.0)
+		draw_layer.draw_string(font,
+			Vector2(bx, row_y + bar_h * 0.85),
+			LABELS[i], HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), lbl_col)
+
+		# Bar background
+		var bar_x := bx + lbl_w
+		draw_layer.draw_rect(Rect2(bar_x, row_y, bar_w, bar_h), Color(0.0, 0.0, 0.0, 0.55))
+
+		# Filled portion — colour fades toward red as HP drops
+		if ratio > 0.0:
+			var base_col : Color = COLORS[i]
+			var fill_col : Color = base_col.lerp(Color(0.9, 0.1, 0.1), 1.0 - ratio)
+			draw_layer.draw_rect(Rect2(bar_x, row_y, bar_w * ratio, bar_h), fill_col)
+
+		# Border
+		draw_layer.draw_rect(Rect2(bar_x, row_y, bar_w, bar_h),
+			Color(0.60, 0.60, 0.60, 0.60), false, maxf(1.0, 1.2 * s))
 
 func _draw_crosshair() -> void:
 	if not camera:
