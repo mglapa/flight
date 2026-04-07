@@ -60,11 +60,35 @@ const GUN_POSITIONS: Array = [
 ]
 const BULLET_SPEED      := 800.0   # m/s — .303 Browning muzzle velocity
 const FIRE_INTERVAL     := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
+const GUN_AMMO_MAX      := 2000    # total .303 rounds across all four guns
 const CONVERGENCE_DIST  := 300.0   # m — historical RAF ~250 yards (229 m) standard
 const GUN_SPREAD        := 0.004   # rad — ~4 mil dispersion per shot
 
-var _gun_index: int  = 0
-var _fire_timer: float = 0.0
+# Hispano Mk II 20 mm cannons — one per wing
+const CANNON_POSITIONS : Array = [
+	Vector3(-6.0, 0.0, -0.5),   # left wing cannon
+	Vector3( 6.0, 0.0, -0.5),   # right wing cannon
+]
+const CANNON_SPEED    := 820.0          # m/s — 20 mm shell muzzle velocity
+const CANNON_INTERVAL := 60.0 / 1400.0 # s between shots (700 RPM × 2 cannons)
+const CANNON_DAMAGE   := 3             # HP deducted per shell hit
+const CANNON_AMMO_MAX := 150            # total 20 mm rounds (75 per cannon)
+
+# Fuel — 600 units = ~10 minutes at full throttle
+const MAX_FUEL        := 600.0
+const BASE_FUEL_DRAIN := 1.0    # units/s at throttle 1.0
+const FUEL_LEAK_RATE  := 3.0    # extra units/s when fuel tank fully destroyed
+
+var _gun_index  : int   = 0
+var _fire_timer : float = 0.0
+var gun_ammo    : int   = GUN_AMMO_MAX
+
+var _cannon_index : int   = 0
+var _cannon_timer : float = 0.0
+var cannon_ammo   : int   = CANNON_AMMO_MAX
+
+var fuel : float = MAX_FUEL
+
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
 
 # -- Aero coefficients --
@@ -108,6 +132,7 @@ var _smoke_timer    : float = 9999.0
 var _smoke_interval : float = 9999.0
 var _smoke_opacity  : float = 0.0
 var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
+var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 
 # -- Audio --
 ## Drag a looping engine .wav/.ogg onto this in the Inspector
@@ -116,12 +141,14 @@ var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _audio_player : AudioStreamPlayer
 
 # Gun audio — procedurally generated
-const _GUN_MIX_RATE  := 22050.0
-const _SHOT_SAMPLES  := 1985       # 90 ms worth of samples at 22050 Hz
+const _GUN_MIX_RATE     := 22050.0
+const _SHOT_SAMPLES     := 1985    # 90 ms at 22050 Hz  — .303 MG
+const _CANNON_SAMPLES   := 3308    # 150 ms at 22050 Hz — 20 mm cannon (longer boom)
 
 var _gun_player   : AudioStreamPlayer
 var _gun_playback : AudioStreamGeneratorPlayback
-var _shot_ages    : Array[int] = []   # age in samples of each active shot
+var _shot_ages        : Array[int] = []   # MG shots
+var _cannon_shot_ages : Array[int] = []   # cannon shots (separate synthesis)
 
 func _ready() -> void:
 	add_to_group("player")
@@ -188,26 +215,40 @@ func _push_gun_audio() -> void:
 	var to_fill := _gun_playback.get_frames_available()
 	for _i in range(to_fill):
 		var sample := 0.0
+
+		# .303 MG — high crack, short decay
 		for j in range(_shot_ages.size() - 1, -1, -1):
 			var t : float = float(_shot_ages[j]) / _GUN_MIX_RATE
-			# Muzzle crack: white noise, sharp 2 ms decay
-			sample += (randf() * 2.0 - 1.0) * exp(-t * 500.0) * 4.0
-			# Pressure boom: 90 Hz sine, 30 ms decay
-			sample += sin(TAU * 90.0  * t) * exp(-t * 33.0) * 3.0
-			# Barrel ring: 500 Hz sine, 15 ms decay
-			sample += sin(TAU * 500.0 * t) * exp(-t * 100.0) * 1.2
+			sample += (randf() * 2.0 - 1.0) * exp(-t * 500.0) * 4.0   # muzzle crack
+			sample += sin(TAU * 90.0  * t) * exp(-t * 33.0)  * 3.0    # 90 Hz boom
+			sample += sin(TAU * 500.0 * t) * exp(-t * 100.0) * 1.2    # 500 Hz ring
 			_shot_ages[j] += 1
 			if _shot_ages[j] >= _SHOT_SAMPLES:
 				_shot_ages.remove_at(j)
-		# Scale down; slight clipping on the crack attack is intentional
+
+		# 20 mm cannon — deep boom, longer decay
+		for j in range(_cannon_shot_ages.size() - 1, -1, -1):
+			var t : float = float(_cannon_shot_ages[j]) / _GUN_MIX_RATE
+			sample += (randf() * 2.0 - 1.0) * exp(-t * 180.0) * 6.0   # heavy crack
+			sample += sin(TAU * 42.0  * t) * exp(-t * 10.0)  * 6.0    # 42 Hz deep thump
+			sample += sin(TAU * 180.0 * t) * exp(-t * 40.0)  * 2.5    # 180 Hz mid ring
+			_cannon_shot_ages[j] += 1
+			if _cannon_shot_ages[j] >= _CANNON_SAMPLES:
+				_cannon_shot_ages.remove_at(j)
+
 		_gun_playback.push_frame(Vector2(clampf(sample * 0.3, -1.0, 1.0),
 										 clampf(sample * 0.3, -1.0, 1.0)))
 
-func take_hit(_hit_pos: Vector3) -> void:
+func take_hit(hit_pos: Vector3, damage: int = 1) -> void:
+	var flash := Node3D.new()
+	flash.set_script(_hit_flash_script)
+	flash.size = float(damage)
+	get_parent().add_child(flash)
+	flash.global_position = hit_pos
+
 	var comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
 	var c : String = comps.pick_random()
-	if comp_hp[c] > 0:
-		comp_hp[c] -= 1
+	comp_hp[c] = maxi(comp_hp[c] - damage, 0)
 
 	if c == "fuel_tank" and not _on_fire and randf() < 0.01:
 		_on_fire = true
@@ -242,12 +283,17 @@ func _physics_process(delta: float) -> void:
 	throttle = clampf(throttle + (throttle_up - throttle_down) * throttle_response * delta, 0.0, 1.0)
 
 	# ========================
-	# GUNS
+	# GUNS & CANNON
 	# ========================
 	_fire_timer = maxf(_fire_timer - delta, 0.0)
-	if Input.is_action_pressed("fire") and _fire_timer == 0.0:
+	if Input.is_action_pressed("fire") and _fire_timer == 0.0 and gun_ammo > 0:
 		_fire_next_gun()
 		_fire_timer = FIRE_INTERVAL
+
+	_cannon_timer = maxf(_cannon_timer - delta, 0.0)
+	if Input.is_action_pressed("fire_cannon") and _cannon_timer == 0.0 and cannon_ammo > 0:
+		_fire_cannon()
+		_cannon_timer = CANNON_INTERVAL
 
 	# ========================
 	# AIRCRAFT AXES
@@ -331,9 +377,16 @@ func _physics_process(delta: float) -> void:
 	var side_force: Vector3 = -right * qS * beta * 0.5
 
 	# ========================
+	# FUEL
+	# ========================
+	var fuel_tank_dmg : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
+	fuel = maxf(fuel - (BASE_FUEL_DRAIN * throttle + FUEL_LEAK_RATE * fuel_tank_dmg) * delta, 0.0)
+
+	# ========================
 	# THRUST
 	# ========================
-	var thrust_force: Vector3 = fwd * max_thrust * throttle * thrust_factor
+	var fuel_factor   : float = 1.0 if fuel > 0.0 else 0.0
+	var thrust_force: Vector3 = fwd * max_thrust * throttle * thrust_factor * fuel_factor
 
 	# ========================
 	# GRAVITY
@@ -532,25 +585,47 @@ func _fire_next_gun() -> void:
 	var gun_local    : Vector3 = GUN_POSITIONS[_gun_index]
 	var muzzle_world : Vector3 = global_transform * gun_local
 	_gun_index = (_gun_index + 1) % GUN_POSITIONS.size()
+	gun_ammo -= 1
 
-	# Toe each gun inward so bullets converge at CONVERGENCE_DIST ahead.
-	# gun_local.x is the lateral offset; aim at (0, 0, -CONVERGENCE_DIST) in local space.
 	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
 	var aim_world : Vector3 = global_transform.basis * aim_local
-
-	# Add a small random dispersion so bursts spread naturally.
 	aim_world = (aim_world
 		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
 		+ global_transform.basis.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
 
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
-	bullet.velocity = velocity + aim_world * BULLET_SPEED
+	bullet.velocity     = velocity + aim_world * BULLET_SPEED
+	bullet.exclude_rids = [_hitbox_body.get_rid()]
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle_world
 
 	if _gun_playback:
 		_shot_ages.append(0)
+
+## Fires one 20 mm cannon shell from the next cannon in the rotation.
+func _fire_cannon() -> void:
+	var gun_local    : Vector3 = CANNON_POSITIONS[_cannon_index]
+	var muzzle_world : Vector3 = global_transform * gun_local
+	_cannon_index = (_cannon_index + 1) % CANNON_POSITIONS.size()
+	cannon_ammo -= 1
+
+	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var aim_world : Vector3 = global_transform.basis * aim_local
+	aim_world = (aim_world
+		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
+		+ global_transform.basis.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
+
+	var bullet := Node3D.new()
+	bullet.set_script(_bullet_script)
+	bullet.damage       = CANNON_DAMAGE
+	bullet.velocity     = velocity + aim_world * CANNON_SPEED
+	bullet.exclude_rids = [_hitbox_body.get_rid()]
+	get_parent().add_child(bullet)
+	bullet.global_position = muzzle_world
+
+	if _gun_playback:
+		_cannon_shot_ages.append(0)
 
 ## Returns the terrain height directly below world_pos using a downward raycast.
 ## Falls back to 0 if nothing is hit (e.g. outside the terrain bounds).

@@ -2,7 +2,9 @@ extends Node3D
 ## A single gun round — moves at muzzle velocity, auto-despawns after 3 s.
 ## Raycasts each frame to detect terrain hits and spawns an impact effect.
 
-var velocity: Vector3 = Vector3.ZERO
+var velocity     : Vector3   = Vector3.ZERO
+var damage       : int       = 1   # 1 for MG rounds, 3 for cannon shells
+var exclude_rids : Array = []  # set to shooter's hitbox RID to avoid self-damage
 
 var _impact_script = preload("res://scenes/plane/impact.gd")
 
@@ -35,12 +37,14 @@ func _process(delta: float) -> void:
 
 	# Raycast from previous to current position to catch terrain intersections
 	var query := PhysicsRayQueryParameters3D.create(prev_pos, global_position)
+	query.collision_mask = 3  # layer 1 = terrain/water, layer 2 = plane hitboxes
+	query.exclude        = exclude_rids
 	var hit := get_world_3d().direct_space_state.intersect_ray(query)
 	if hit:
 		var parent = hit.collider.get_parent()
 		if parent != null and parent.has_method("take_hit"):
 			# Hit an enemy aircraft
-			parent.take_hit(hit.position)
+			parent.take_hit(hit.position, damage)
 		else:
 			# Hit terrain
 			_spawn_impact(hit.position)

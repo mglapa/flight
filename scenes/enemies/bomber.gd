@@ -89,6 +89,7 @@ var _smoke_interval : float = 9999.0
 var _smoke_opacity  : float = 0.0
 
 var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
+var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _bullet_script     = preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
 
@@ -281,14 +282,19 @@ func _update_bomber(delta: float) -> void:
 
 # ── Damage ────────────────────────────────────────────────────────────────────
 
-func take_hit(hit_pos: Vector3) -> void:
+func take_hit(hit_pos: Vector3, damage: int = 1) -> void:
 	if _dead:
 		return
 
+	var flash := Node3D.new()
+	flash.set_script(_hit_flash_script)
+	flash.size = float(damage)
+	get_parent().add_child(flash)
+	flash.global_position = hit_pos
+
 	var comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
 	var c : String = comps.pick_random()
-	if comp_hp[c] > 0:
-		comp_hp[c] -= 1
+	comp_hp[c] = maxi(comp_hp[c] - damage, 0)
 
 	if c == "fuel_tank" and not _on_fire and randf() < 0.01:
 		_on_fire = true
@@ -339,7 +345,8 @@ func _fire_gunner(player: Node3D, muzzle_world: Vector3) -> void:
 
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
-	bullet.velocity = _velocity + aim_dir * BULLET_SPEED
+	bullet.velocity     = _velocity + aim_dir * BULLET_SPEED
+	bullet.exclude_rids = [_body_rid]
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle_world
 

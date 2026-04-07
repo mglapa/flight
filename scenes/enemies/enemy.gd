@@ -77,6 +77,7 @@ var _aspect_ratio : float = WING_SPAN * WING_SPAN / WING_AREA
 
 var _fire_cd : float = 0.0
 var _gun_idx : int   = 0
+var _gun_ammo: int   = 2000
 
 # ── Smoke ─────────────────────────────────────────────────────────────────────
 var _smoke_timer    : float = 9999.0
@@ -339,25 +340,25 @@ func _update_chase(delta: float, escort_slot: Vector3 = Vector3.INF) -> void:
 		if _fire_cd <= 0.0 and not too_low:
 			var to_tgt   : Vector3 = chase_target.global_position - global_position
 			var angle_to : float   = fwd.angle_to(to_tgt.normalized())
-			if to_tgt.length() < FIRE_RANGE and angle_to < FIRE_CONE:
+			if to_tgt.length() < FIRE_RANGE and angle_to < FIRE_CONE and _gun_ammo > 0:
 				_fire_enemy_gun()
 				_fire_cd = FIRE_INTERVAL
 
 # ── Damage ────────────────────────────────────────────────────────────────────
 
-func take_hit(hit_pos: Vector3) -> void:
+func take_hit(hit_pos: Vector3, damage: int = 1) -> void:
 	if _dead:
 		return
 
 	var flash := Node3D.new()
 	flash.set_script(_hit_flash_script)
+	flash.size = float(damage)
 	get_parent().add_child(flash)
 	flash.global_position = hit_pos
 
 	var comps := ["wing", "elevator", "rudder", "engine", "fuel_tank"]
 	var c : String = comps.pick_random()
-	if comp_hp[c] > 0:
-		comp_hp[c] -= 1
+	comp_hp[c] = maxi(comp_hp[c] - damage, 0)
 
 	if c == "fuel_tank" and not _on_fire and randf() < 0.01:
 		_on_fire = true
@@ -400,6 +401,7 @@ func _fire_enemy_gun() -> void:
 	var gun_local : Vector3 = CHASE_GUNS[_gun_idx]
 	var muzzle    : Vector3 = global_transform * gun_local
 	_gun_idx = (_gun_idx + 1) % CHASE_GUNS.size()
+	_gun_ammo -= 1
 
 	# Toe guns inward to converge at CONVERGENCE_DIST.
 	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
@@ -412,7 +414,8 @@ func _fire_enemy_gun() -> void:
 
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
-	bullet.velocity = _velocity + aim_world * 800.0
+	bullet.velocity     = _velocity + aim_world * 800.0
+	bullet.exclude_rids = [_body_rid]
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle
 

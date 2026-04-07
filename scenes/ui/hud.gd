@@ -66,6 +66,7 @@ func _draw_instruments() -> void:
 	_draw_compass(    Vector2(cx + gap, cy), r, heading)
 	_draw_crosshair()
 	_draw_health_bar( vp)
+	_draw_fuel_ammo(  Vector2(cx + gap + r + 28.0 * _hud_scale, cy), r)
 
 func _draw_radar(center: Vector2, radius: float) -> void:
 	const RANGE := 2000.0
@@ -333,3 +334,74 @@ func _draw_compass(center: Vector2, radius: float, heading: float) -> void:
 
 	draw_layer.draw_string(font, center + Vector2(-15.0 * s, -radius - 10.0 * s),
 		"HDG", HORIZONTAL_ALIGNMENT_LEFT, -1, int(14 * s), Color(1.0, 1.0, 1.0, 0.7))
+
+func _draw_fuel_ammo(anchor: Vector2, radius: float) -> void:
+	## anchor = point just to the right of the compass circle
+	var s    := _hud_scale
+	var font := ThemeDB.fallback_font
+
+	var fuel       : float = plane.get("fuel")          if "fuel"          in plane else 0.0
+	var max_fuel   : float = plane.get("MAX_FUEL")       if "MAX_FUEL"       in plane else 600.0
+	var gun_ammo   : int   = plane.get("gun_ammo")       if "gun_ammo"       in plane else 0
+	var gun_max    : int   = plane.get("GUN_AMMO_MAX")   if "GUN_AMMO_MAX"   in plane else 2000
+	var can_ammo   : int   = plane.get("cannon_ammo")    if "cannon_ammo"    in plane else 0
+	var can_max    : int   = plane.get("CANNON_AMMO_MAX") if "CANNON_AMMO_MAX" in plane else 150
+	var on_fire    : bool  = plane.get("_on_fire")       if "_on_fire"       in plane else false
+
+	var bar_w   := 110.0 * s
+	var bar_h   :=  11.0 * s
+	var row_gap :=   5.0 * s
+	var lbl_w   :=  40.0 * s
+	var bx      := anchor.x          # left edge of label column
+	var bar_x   := bx + lbl_w        # left edge of bar column
+
+	# Vertically centre the three rows around the compass midpoint
+	var total_h := bar_h * 3.0 + row_gap * 2.0
+	var by      := anchor.y - total_h * 0.5
+
+	# ── Row 0: Fuel ────────────────────────────────────────────────────────────
+	var fuel_ratio := clampf(fuel / max_fuel, 0.0, 1.0)
+	var fuel_col   : Color
+	if fuel_ratio > 0.4:
+		fuel_col = Color(0.20, 0.85, 0.20)                     # green
+	elif fuel_ratio > 0.15:
+		fuel_col = Color(1.00, 0.75, 0.10)                     # amber
+	else:
+		fuel_col = Color(0.95, 0.15, 0.15)                     # red — bingo fuel
+
+	var lbl0_col := Color(1.0, 0.30, 0.10, 1.0) if on_fire else Color(0.85, 0.85, 0.85, 0.80)
+	draw_layer.draw_string(font, Vector2(bx, by + bar_h * 0.85),
+		"FUEL", HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), lbl0_col)
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h), Color(0.0, 0.0, 0.0, 0.55))
+	if fuel_ratio > 0.0:
+		draw_layer.draw_rect(Rect2(bar_x, by, bar_w * fuel_ratio, bar_h), fuel_col)
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h),
+		Color(0.6, 0.6, 0.6, 0.6), false, maxf(1.0, 1.2 * s))
+
+	# ── Row 1: Main gun ammo ───────────────────────────────────────────────────
+	var gun_ratio := clampf(float(gun_ammo) / float(gun_max), 0.0, 1.0)
+	by += bar_h + row_gap
+	draw_layer.draw_string(font, Vector2(bx, by + bar_h * 0.85),
+		"GUN", HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), Color(0.85, 0.85, 0.85, 0.80))
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h), Color(0.0, 0.0, 0.0, 0.55))
+	if gun_ratio > 0.0:
+		var g_col := Color(0.90, 0.90, 0.90).lerp(Color(0.9, 0.15, 0.15), 1.0 - gun_ratio)
+		draw_layer.draw_rect(Rect2(bar_x, by, bar_w * gun_ratio, bar_h), g_col)
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h),
+		Color(0.6, 0.6, 0.6, 0.6), false, maxf(1.0, 1.2 * s))
+	draw_layer.draw_string(font, Vector2(bar_x + bar_w + 4.0 * s, by + bar_h * 0.85),
+		"%d" % gun_ammo, HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), Color(0.80, 0.80, 0.80, 0.75))
+
+	# ── Row 2: Cannon ammo ────────────────────────────────────────────────────
+	var can_ratio := clampf(float(can_ammo) / float(can_max), 0.0, 1.0)
+	by += bar_h + row_gap
+	draw_layer.draw_string(font, Vector2(bx, by + bar_h * 0.85),
+		"CNS", HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), Color(0.85, 0.85, 0.85, 0.80))
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h), Color(0.0, 0.0, 0.0, 0.55))
+	if can_ratio > 0.0:
+		var c_col := Color(1.00, 0.55, 0.10).lerp(Color(0.9, 0.15, 0.15), 1.0 - can_ratio)
+		draw_layer.draw_rect(Rect2(bar_x, by, bar_w * can_ratio, bar_h), c_col)
+	draw_layer.draw_rect(Rect2(bar_x, by, bar_w, bar_h),
+		Color(0.6, 0.6, 0.6, 0.6), false, maxf(1.0, 1.2 * s))
+	draw_layer.draw_string(font, Vector2(bar_x + bar_w + 4.0 * s, by + bar_h * 0.85),
+		"%d" % can_ammo, HORIZONTAL_ALIGNMENT_LEFT, -1, int(10 * s), Color(0.80, 0.80, 0.80, 0.75))
