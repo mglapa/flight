@@ -4,7 +4,10 @@ extends Node3D
 ## Four defensive gunners each cover a 180° hemisphere; they fire at the player
 ## when within 500 m and inside their respective coverage arc.
 
-const COMP_MAX   : int = 8   # He 111 is tougher — 8 HP per component (40 total)
+const COMP_MAX        : int   = 8      # He 111 is tougher — 8 HP per component (40 total)
+const MAX_FUEL        : float = 2400.0 # double fighter fuel — heavy bomber carries more
+const BASE_FUEL_DRAIN : float = 1.0    # units/s at throttle 1.0
+const FUEL_LEAK_RATE  : float = 3.0    # extra units/s when fuel tank fully destroyed
 
 # ── Aerodynamics (He 111 H-6 class) ──────────────────────────────────────────
 const AIRCRAFT_MASS  := 14000.0   # kg (loaded)
@@ -73,6 +76,7 @@ var _dead_vel : Vector3 = Vector3.ZERO
 var _dead_age : float   = 0.0
 
 # ── Aerodynamic state ─────────────────────────────────────────────────────────
+var _fuel         : float   = MAX_FUEL
 var _velocity     : Vector3 = Vector3.ZERO
 var _pitch_rate   : float   = 0.0
 var _roll_rate    : float   = 0.0
@@ -92,6 +96,7 @@ var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _bullet_script     = preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
+var _mats     : Array = []   # all mesh materials — used by set_cloud_alpha()
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -191,7 +196,10 @@ func _update_bomber(delta: float) -> void:
 	# Thrust — auto-throttle + health degradation
 	var throttle_target := 1.0 if speed < ORBIT_SPEED else 0.60
 	_throttle = clampf(lerpf(_throttle, throttle_target, 1.5 * delta), 0.0, 1.0)
-	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle * thrust_factor
+	var fuel_tank_dmg_f : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
+	_fuel = maxf(_fuel - (BASE_FUEL_DRAIN * _throttle + FUEL_LEAK_RATE * fuel_tank_dmg_f) * delta, 0.0)
+	var fuel_factor : float = 1.0 if _fuel > 0.0 else 0.0
+	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle * thrust_factor * fuel_factor
 
 	var weight : Vector3 = Vector3.DOWN * AIRCRAFT_MASS * GRAVITY
 
@@ -373,22 +381,33 @@ func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 
 # ── Mesh ──────────────────────────────────────────────────────────────────────
 
+func set_cloud_alpha(alpha: float) -> void:
+	for m in _mats:
+		var mat := m as StandardMaterial3D
+		mat.transparency   = (BaseMaterial3D.TRANSPARENCY_ALPHA
+							  if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED)
+		mat.albedo_color.a = alpha
+
 func _build_mesh() -> void:
 	var fus_mat := StandardMaterial3D.new()
 	fus_mat.albedo_color = Color(0.30, 0.33, 0.24)   # RLM 70/71 dark green-grey
 	fus_mat.roughness    = 0.85
+	_mats.append(fus_mat)
 
 	var wing_mat := StandardMaterial3D.new()
 	wing_mat.albedo_color = Color(0.27, 0.30, 0.21)
 	wing_mat.roughness    = 0.85
+	_mats.append(wing_mat)
 
 	var engine_mat := StandardMaterial3D.new()
 	engine_mat.albedo_color = Color(0.20, 0.20, 0.19)
 	engine_mat.roughness    = 0.9
+	_mats.append(engine_mat)
 
 	var turret_mat := StandardMaterial3D.new()
 	turret_mat.albedo_color = Color(0.55, 0.52, 0.38)
 	turret_mat.roughness    = 0.6
+	_mats.append(turret_mat)
 
 	# Main fuselage — 14 m long
 	var fuselage := MeshInstance3D.new()

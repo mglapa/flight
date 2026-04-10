@@ -61,8 +61,8 @@ const GUN_POSITIONS: Array = [
 const BULLET_SPEED      := 800.0   # m/s — .303 Browning muzzle velocity
 const FIRE_INTERVAL     := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
 const GUN_AMMO_MAX      := 2000    # total .303 rounds across all four guns
-const CONVERGENCE_DIST  := 300.0   # m — historical RAF ~250 yards (229 m) standard
-const GUN_SPREAD        := 0.004   # rad — ~4 mil dispersion per shot
+const CONVERGENCE_DIST  := 400.0   # m — historical RAF ~250 yards (229 m) standard
+const GUN_SPREAD        := 0.005   # rad — ~4 mil dispersion per shot
 
 # Hispano Mk II 20 mm cannons — one per wing
 const CANNON_POSITIONS : Array = [
@@ -74,8 +74,8 @@ const CANNON_INTERVAL := 60.0 / 1400.0 # s between shots (700 RPM × 2 cannons)
 const CANNON_DAMAGE   := 3             # HP deducted per shell hit
 const CANNON_AMMO_MAX := 150            # total 20 mm rounds (75 per cannon)
 
-# Fuel — 600 units = ~10 minutes at full throttle
-const MAX_FUEL        := 600.0
+# Fuel — 1200 units = ~20 minutes at full throttle
+const MAX_FUEL        := 1200.0
 const BASE_FUEL_DRAIN := 1.0    # units/s at throttle 1.0
 const FUEL_LEAK_RATE  := 3.0    # extra units/s when fuel tank fully destroyed
 
@@ -161,6 +161,22 @@ func _ready() -> void:
 	_hitbox_body.collision_mask  = 2
 	_setup_engine_audio()
 	_setup_gun_audio()
+	_load_model()
+
+func _load_model() -> void:
+	# Hide the placeholder box meshes defined in plane.tscn
+	for child_name in ["Fuselage", "Wings", "Tail", "TailFin", "WheelLeft", "WheelRight", "TailWheel"]:
+		var n := get_node_or_null(child_name)
+		if n:
+			n.visible = false
+
+	var packed : PackedScene = load("res://assets/fighter_v1.glb")
+	if packed == null:
+		return
+	var model : Node3D = packed.instantiate()
+	# If the model faces the wrong direction, uncomment and adjust:
+	# model.rotation_degrees.y = 180.0
+	add_child(model)
 
 func _setup_gun_audio() -> void:
 	var gen := AudioStreamGenerator.new()

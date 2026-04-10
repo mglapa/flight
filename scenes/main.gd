@@ -21,3 +21,29 @@ func _ready() -> void:
 		+ b.z * camera.follow_distance
 		+ b.y * camera.follow_height
 	)
+
+func _process(delta: float) -> void:
+	if not is_instance_valid(plane):
+		return
+
+	var clouds := get_tree().get_nodes_in_group("clouds")
+	if clouds.is_empty():
+		return
+
+	# ── Player fog ────────────────────────────────────────────────────────────
+	var player_depth := 0.0
+	for cloud in clouds:
+		if is_instance_valid(cloud):
+			player_depth = maxf(player_depth, cloud.depth_at(plane.global_position))
+	hud.cloud_fog = lerpf(hud.cloud_fog, player_depth, 6.0 * delta)
+
+	# ── Enemy visibility ──────────────────────────────────────────────────────
+	for enemy in get_tree().get_nodes_in_group("enemies"):
+		if not is_instance_valid(enemy):
+			continue
+		var depth := 0.0
+		for cloud in clouds:
+			if is_instance_valid(cloud):
+				depth = maxf(depth, cloud.depth_at(enemy.global_position))
+		if enemy.has_method("set_cloud_alpha"):
+			enemy.set_cloud_alpha(lerpf(1.0, 0.08, depth))

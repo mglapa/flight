@@ -12,13 +12,21 @@ extends Camera3D
 const _DEADZONE     := 0.15
 const _SNAP_SPEED   := 8.0          # how fast offsets return to zero
 const _MAX_YAW      := PI           # 180° look-behind
-const _MAX_YAW_SIDE := 1.047197551  # 60° side swing
-const _MAX_PITCH    := 1.047197551  # 60° tilt up
+const _MAX_YAW_SIDE := 1.570796326  # 60° side swing
+const _MAX_PITCH    := 1.570796326  # 60° tilt up
+
+const _BASE_FOV   := 75.0
+const _ZOOM_SPEED := 22.0   # how fast FOV and zoom blend lerp
+
+# Cockpit-like position when fully zoomed (local offset from plane centre)
+const _ZOOM_OFFSET   := Vector3(0.0, 1.0, 0.0)   # at plane centre, slightly above
+const _ZOOM_AIM_DIST := 2000.0                    # look this far ahead when zoomed
 
 var target: Node3D
 
 var _yaw_offset   : float = 0.0
 var _pitch_offset : float = 0.0
+var _zoom_blend   : float = 0.0   # 0 = chase cam, 1 = full gunsight
 
 func _ready() -> void:
 	if target_path:
@@ -71,11 +79,40 @@ func _physics_process(delta: float) -> void:
 	var right_after_yaw := tb.x.rotated(tb.y.normalized(), _yaw_offset).normalized()
 	offset = offset.rotated(right_after_yaw, _pitch_offset)
 
-	var desired_position : Vector3 = target.global_position + offset
-	global_position = global_position.lerp(desired_position, position_speed * delta)
+	# ── Zoom (LB / RB) ───────────────────────────────────────────────────────
+	var lb := Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER)
+	var rb := Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER)
+	var target_fov   : float
+	var target_blend : float
+	if lb and rb:
+		target_fov   = _BASE_FOV / 8.0
+		target_blend = 1.0
+	elif lb:
+		target_fov   = _BASE_FOV / 4.0
+		target_blend = 0.67
+	elif rb:
+		target_fov   = _BASE_FOV / 2.0
+		target_blend = 0.33
+	else:
+		target_fov   = _BASE_FOV
+		target_blend = 0.0
+	fov          = lerpf(fov,          target_fov,   _ZOOM_SPEED * delta)
+	_zoom_blend  = lerpf(_zoom_blend,  target_blend, _ZOOM_SPEED * delta)
 
-	# ── Rotation: always look at the plane ───────────────────────────────────
-	var to_target := target.global_position - global_position
+	# Blend camera position: chase offset → cockpit position
+	# Use a faster lerp speed when zoomed so the camera reaches the zoom spot before
+	# _zoom_blend saturates — prevents the tail being visible mid-transition.
+	var zoom_pos     : Vector3 = target.global_position + tb * _ZOOM_OFFSET
+	var desired_position : Vector3 = lerp(target.global_position + offset, zoom_pos, _zoom_blend)
+	var effective_pos_speed := lerpf(position_speed, _ZOOM_SPEED, _zoom_blend)
+	global_position = global_position.lerp(desired_position, effective_pos_speed * delta)
+
+	# Blend look-at target: plane centre → point ahead along gun axis
+	var aim_point   : Vector3 = target.global_position - tb.z * _ZOOM_AIM_DIST
+	var look_target : Vector3 = lerp(target.global_position, aim_point, _zoom_blend)
+
+	# ── Rotation: look at blended target ─────────────────────────────────────
+	var to_target := look_target - global_position
 	if to_target.length_squared() > 0.001:
 		var desired_basis := Basis.looking_at(to_target, tb.y)
 		var current_quat  := Quaternion(global_transform.basis.orthonormalized())

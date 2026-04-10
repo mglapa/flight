@@ -34,6 +34,27 @@ func _ready() -> void:
 		_create_sea()
 		_create_scenery()
 	_spawn_enemies()
+	_spawn_clouds()
+	_spawn_high_clouds()
+	_create_environment()
+
+func _create_environment() -> void:
+	var we := get_node_or_null("WorldEnvironment")
+	if we == null:
+		return
+	var env : Environment = we.environment
+
+	var fog_color : Color
+	if GameSettings.cloud_preset == GameSettings.CloudPreset.CLEAR:
+		fog_color = Color(0.53, 0.76, 0.98)   # clear blue sky haze
+	else:
+		fog_color = Color(0.68, 0.80, 0.92)   # overcast blue-grey haze
+
+	env.fog_enabled            = true
+	env.fog_light_color        = fog_color
+	env.fog_light_energy       = 1.0
+	env.fog_density            = 0.000005
+	env.fog_aerial_perspective = 0.35
 
 func _process(delta: float) -> void:
 	_chase_clock -= delta
@@ -392,6 +413,78 @@ func _spawn_enemies() -> void:
 		f.formation_leader = lead_bomber
 		f.formation_offset = e_offset
 		add_child(f)
+
+func _spawn_high_clouds() -> void:
+	var preset : int = GameSettings.cloud_preset
+
+	# Presets that include no high clouds
+	if preset == GameSettings.CloudPreset.CLEAR or preset == GameSettings.CloudPreset.CUMULUS:
+		return
+
+	var rng := RandomNumberGenerator.new()
+	var chosen_type : int
+	var alt : float
+
+	match preset:
+		GameSettings.CloudPreset.CIRROSTRATUS:
+			chosen_type = 0   # CloudType.CIRROSTRATUS
+			alt = rng.randf_range(6096.0, 9144.0)
+		GameSettings.CloudPreset.CIRROCUMULUS:
+			chosen_type = 2   # CloudType.CIRROCUMULUS
+			alt = rng.randf_range(6096.0, 9144.0)
+		GameSettings.CloudPreset.OVERCAST:
+			chosen_type = 0   # CIRROSTRATUS — thick high veil for overcast feel
+			alt = rng.randf_range(6096.0, 7500.0)  # lower ceiling for overcast
+		_:  # RANDOM — cirrus excluded entirely; pick cirrostratus or cirrocumulus
+			rng.randomize()
+			chosen_type = [0, 2][rng.randi_range(0, 1)]
+			alt = rng.randf_range(6096.0, 9144.0)
+
+	var script := load("res://scenes/world/high_cloud_layer.gd")
+	var layer  := Node3D.new()
+	layer.set_script(script)
+	layer.cloud_type = chosen_type
+	layer.altitude   = alt
+	add_child(layer)
+
+func _spawn_clouds() -> void:
+	var preset : int = GameSettings.cloud_preset
+
+	# Presets with no mid-level cumulus
+	if preset == GameSettings.CloudPreset.CLEAR \
+	or preset == GameSettings.CloudPreset.CIRROSTRATUS \
+	or preset == GameSettings.CloudPreset.CIRROCUMULUS:
+		return
+
+	var cloud_script := load("res://scenes/world/cloud.gd")
+	# Columns: x, altitude (m), z, radius (m)
+	# Clouds at and around 15,000 ft (4572 m) — some above, some just below
+	var configs : Array = [
+		[   200, 4450, -1500, 220],
+		[ -1300, 4600,  -700, 280],
+		[   900, 4500,  -300, 200],
+		[ -2100, 4350, -2600, 320],
+		[  1600, 4750, -3200, 240],
+		[ -3000, 5000, -1100, 300],
+		[   400, 5100,   600, 210],
+		[ -1000, 4800,  1400, 260],
+		[  2600, 4400, -4100, 280],
+		[ -2600, 4650, -3600, 320],
+		[     0, 4300,  -900, 180],
+		[  1900, 5200,   300, 200],
+		[ -1600, 4900,  -200, 240],
+		[  3100, 4500, -2100, 220],
+		[ -3600, 4700,   400, 280],
+		[   700, 4550,  2200, 200],
+		[ -2400, 5300, -4500, 260],
+		[  1200, 4200,   900, 180],
+	]
+	for cfg in configs:
+		var c := Node3D.new()
+		c.set_script(cloud_script)
+		c.radius = float(cfg[3])
+		add_child(c)
+		c.global_position = Vector3(float(cfg[0]), float(cfg[1]), float(cfg[2]))
 
 func _create_runway() -> void:
 	var ry := PLATEAU_HEIGHT   # runway sits on the plateau

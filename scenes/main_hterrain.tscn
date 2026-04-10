@@ -10,11 +10,11 @@
 [ext_resource type="Resource" uid="uid://b5w3hndbqkp8y" path="res://terrain_data/grass.tres" id="8_xkykm"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_tipki"]
-size = Vector2(100000, 100000)
+size = Vector2(1000000, 1000000)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_85g3d"]
 transparency = 1
-albedo_color = Color(0, 0.101960786, 0.38431373, 0.9843137)
+albedo_color = Color(3.6098065e-08, 0.124779485, 0.34108084, 0.9843137)
 
 [node name="Main" type="Node3D" unique_id=1576107502]
 script = ExtResource("1")
@@ -28,7 +28,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 165, -50)
 [node name="ChaseCamera" parent="." unique_id=121026052 instance=ExtResource("4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 169, -38)
 fov = 100.0
-far = 60000.0
+far = 500000.0
 
 [node name="HUD" parent="." unique_id=1827228673 instance=ExtResource("5")]
 
@@ -54,6 +54,6 @@ shader_params/u_tile_reduction = null
 metadata/_custom_type_script = "uid://bt7t628vjcpk7"
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="HTerrain" unique_id=1708306394]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 997.4421, 14.09137, 1018.59863)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 32.152588, 14.09137, 21.296143)
 mesh = SubResource("PlaneMesh_tipki")
 surface_material_override/0 = SubResource("StandardMaterial3D_85g3d")

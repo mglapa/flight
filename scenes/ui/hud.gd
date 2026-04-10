@@ -12,6 +12,9 @@ extends CanvasLayer
 var plane: Node3D
 var camera: Camera3D
 
+## Set each frame by main.gd — drives the in-cloud fog overlay (0 = clear, 1 = dense)
+var cloud_fog : float = 0.0
+
 ## Scale factor relative to the 2560×1440 reference resolution.
 ## Recomputed every frame so the HUD adapts instantly to resolution changes.
 var _hud_scale : float = 1.0
@@ -44,6 +47,13 @@ func _process(_delta: float) -> void:
 func _draw_instruments() -> void:
 	if not plane:
 		return
+
+	# In-cloud whiteout — drawn first so all instruments remain legible on top
+	if cloud_fog > 0.01:
+		var vp_size := get_viewport().get_visible_rect().size
+		draw_layer.draw_rect(Rect2(Vector2.ZERO, vp_size),
+			Color(0.92, 0.95, 1.0, minf(cloud_fog * 0.94, 0.94)))
+
 	var basis := plane.global_transform.basis
 	var fwd   := -basis.z
 	var right := basis.x

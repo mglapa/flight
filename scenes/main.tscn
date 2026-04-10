@@ -16,7 +16,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 165, -50)
 
 [node name="ChaseCamera" parent="." unique_id=121026052 instance=ExtResource("4")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 169, -38)
-far = 30000.0
+far = 60000.0
 follow_distance = 20.0
 follow_height = 5.0
 position_speed = 15.0

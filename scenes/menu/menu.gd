@@ -43,19 +43,39 @@ func _build_map_panel() -> Control:
 	var p := Control.new()
 	p.set_anchors_preset(Control.PRESET_FULL_RECT)
 
-	p.add_child(_label("SELECT MAP", 0.5, 0.25, 500, 60, 38))
+	p.add_child(_label("SELECT MAP", 0.5, 0.22, 500, 60, 38))
 
-	var proc := _button("Procedural Map\nCliffs of Dover", 0.38, 0.50, 280, 90)
+	# ── Cloud preset row ──────────────────────────────────────────────────────
+	p.add_child(_label("CLOUDS", 0.5, 0.36, 300, 36, 18))
+
+	var cloud_drop := OptionButton.new()
+	cloud_drop.add_item("Random",        GameSettings.CloudPreset.RANDOM)
+	cloud_drop.add_item("Clear",         GameSettings.CloudPreset.CLEAR)
+	cloud_drop.add_item("Cumulus",       GameSettings.CloudPreset.CUMULUS)
+	cloud_drop.add_item("Cirrostratus",  GameSettings.CloudPreset.CIRROSTRATUS)
+	cloud_drop.add_item("Cirrocumulus",  GameSettings.CloudPreset.CIRROCUMULUS)
+	cloud_drop.add_item("Overcast",      GameSettings.CloudPreset.OVERCAST)
+	cloud_drop.selected = GameSettings.cloud_preset
+	cloud_drop.anchor_left   = 0.5;  cloud_drop.anchor_right  = 0.5
+	cloud_drop.anchor_top    = 0.43; cloud_drop.anchor_bottom = 0.43
+	cloud_drop.offset_left   = -130; cloud_drop.offset_right  = 130
+	cloud_drop.offset_top    = -22;  cloud_drop.offset_bottom = 22
+	cloud_drop.item_selected.connect(func(idx: int):
+		GameSettings.cloud_preset = cloud_drop.get_item_id(idx))
+	p.add_child(cloud_drop)
+
+	# ── Map buttons ───────────────────────────────────────────────────────────
+	var proc := _button("Procedural Map\nCliffs of Dover", 0.38, 0.58, 280, 90)
 	proc.pressed.connect(func():
 		get_tree().change_scene_to_file("res://scenes/main.tscn"))
 	p.add_child(proc)
 
-	var custom := _button("Custom Map\nHTerrain Editor", 0.62, 0.50, 280, 90)
+	var custom := _button("Custom Map\nHTerrain Editor", 0.62, 0.58, 280, 90)
 	custom.pressed.connect(func():
 		get_tree().change_scene_to_file("res://scenes/main_hterrain.tscn"))
 	p.add_child(custom)
 
-	var back := _button("BACK", 0.5, 0.70, 160, 52)
+	var back := _button("BACK", 0.5, 0.76, 160, 52)
 	back.pressed.connect(func():
 		_map_panel.visible  = false
 		_main_panel.visible = true)

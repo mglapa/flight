@@ -44,6 +44,10 @@ const CHASE_GUNS       : Array = [Vector3(-3.0, 0.0, -0.8), Vector3(3.0, 0.0, -0
 const CONVERGENCE_DIST : float = 300.0   # m — same as player (historical RAF ~250 yards)
 const GUN_SPREAD       : float = 0.004   # rad dispersion per shot
 
+const MAX_FUEL        : float = 1200.0  # units — same as player
+const BASE_FUEL_DRAIN : float = 1.0     # units/s at throttle 1.0
+const FUEL_LEAK_RATE  : float = 3.0     # extra units/s when fuel tank fully destroyed
+
 # ── Orbit parameters (set before add_child) ───────────────────────────────────
 var orbit_center   : Vector3 = Vector3.ZERO
 var orbit_radius   : float   = 800.0
@@ -78,6 +82,7 @@ var _aspect_ratio : float = WING_SPAN * WING_SPAN / WING_AREA
 var _fire_cd : float = 0.0
 var _gun_idx : int   = 0
 var _gun_ammo: int   = 2000
+var _fuel    : float = MAX_FUEL
 
 # ── Smoke ─────────────────────────────────────────────────────────────────────
 var _smoke_timer    : float = 9999.0
@@ -88,6 +93,7 @@ var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _bullet_script     = preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
+var _mats     : Array = []   # all mesh materials — used by set_cloud_alpha()
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -228,7 +234,13 @@ func _update_chase(delta: float, escort_slot: Vector3 = Vector3.INF) -> void:
 	# ── Auto-throttle: push hard when slow, ease back when fast ───────────────
 	var throttle_target := 1.0 if speed < TARGET_SPEED else 0.65
 	_throttle = clampf(lerpf(_throttle, throttle_target, 1.5 * delta), 0.0, 1.0)
-	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle * thrust_factor
+
+	# ── Fuel consumption + leak ────────────────────────────────────────────────
+	var fuel_tank_dmg_f : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
+	_fuel = maxf(_fuel - (BASE_FUEL_DRAIN * _throttle + FUEL_LEAK_RATE * fuel_tank_dmg_f) * delta, 0.0)
+	var fuel_factor : float = 1.0 if _fuel > 0.0 else 0.0
+
+	var thrust_force : Vector3 = fwd * MAX_THRUST * _throttle * thrust_factor * fuel_factor
 
 	# ── Gravity ───────────────────────────────────────────────────────────────
 	var weight : Vector3 = Vector3.DOWN * AIRCRAFT_MASS * GRAVITY
@@ -438,36 +450,32 @@ func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+func set_cloud_alpha(alpha: float) -> void:
+	for m in _mats:
+		var mat := m as StandardMaterial3D
+		mat.transparency      = (BaseMaterial3D.TRANSPARENCY_ALPHA
+								 if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED)
+		mat.albedo_color.a    = alpha
+
 func _build_mesh() -> void:
-	var fus_mat := StandardMaterial3D.new()
-	fus_mat.albedo_color = Color(0.45, 0.35, 0.25)
-	fus_mat.roughness    = 0.8
+	var packed : PackedScene = load("res://assets/fighter_v1.glb")
+	if packed == null:
+		return
+	var model : Node3D = packed.instantiate()
+	# If the model faces the wrong direction, uncomment and adjust:
+	# model.rotation_degrees.y = 180.0
+	add_child(model)
 
-	var wing_mat := StandardMaterial3D.new()
-	wing_mat.albedo_color = Color(0.40, 0.30, 0.22)
-	wing_mat.roughness    = 0.8
-
-	var fuselage := MeshInstance3D.new()
-	var fm := BoxMesh.new(); fm.size = Vector3(1.0, 1.2, 9.8)
-	fuselage.mesh = fm; fuselage.material_override = fus_mat
-	add_child(fuselage)
-
-	var wings := MeshInstance3D.new()
-	var wm := BoxMesh.new(); wm.size = Vector3(11.3, 0.15, 1.7)
-	wings.mesh = wm; wings.material_override = wing_mat
-	add_child(wings)
-
-	var tail := MeshInstance3D.new()
-	var tm := BoxMesh.new(); tm.size = Vector3(4.0, 0.12, 1.1)
-	tail.mesh = tm; tail.position = Vector3(0, 0.4, 4.0)
-	tail.material_override = wing_mat
-	add_child(tail)
-
-	var fin := MeshInstance3D.new()
-	var fm2 := BoxMesh.new(); fm2.size = Vector3(0.15, 1.5, 1.5)
-	fin.mesh = fm2; fin.position = Vector3(0, 1.3, 4.0)
-	fin.material_override = fus_mat
-	add_child(fin)
+	# Collect per-instance material duplicates so set_cloud_alpha() can
+	# dim each enemy independently without affecting shared GLB resources.
+	for mi in model.find_children("*", "MeshInstance3D", true, false):
+		var mesh_inst := mi as MeshInstance3D
+		for i in range(mesh_inst.mesh.get_surface_count()):
+			var mat := mesh_inst.mesh.surface_get_material(i)
+			if mat is StandardMaterial3D:
+				var m := mat.duplicate() as StandardMaterial3D
+				mesh_inst.set_surface_override_material(i, m)
+				_mats.append(m)
 
 func _build_collision() -> void:
 	var body := StaticBody3D.new()

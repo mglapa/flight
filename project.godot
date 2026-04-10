@@ -19,10 +19,14 @@ config/description="A low-poly WW2 flying game"
 run/main_scene="res://scenes/menu/menu.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 
+[autoload]
+
+GameSettings="*res://scenes/game_settings.gd"
+
 [display]
 
-window/size/viewport_width=3840
-window/size/viewport_height=2160
+window/size/viewport_width=1920
+window/size/viewport_height=1080
 window/size/mode=2
 window/stretch/mode="viewport"
 window/vsync/vsync_mode=0
@@ -30,6 +34,10 @@ window/vsync/vsync_mode=0
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/zylann.hterrain/plugin.cfg")
+
+[filesystem]
+
+import/blender/enabled=false
 
 [input]
 
