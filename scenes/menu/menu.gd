@@ -2,7 +2,7 @@ extends Node3D
 ## Main menu: a live diorama (Spitfire cruising past the white cliffs) behind
 ## a title block, weather selection and the sortie button.
 
-const Spitfire := preload("res://scenes/plane/spitfire/spitfire_model.gd")
+const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
 const Cloud := preload("res://scenes/world/weather/cloud.gd")
 const SEA_SHADER := preload("res://scenes/world/dover/sea.gdshader")
 const CLOUD_SHADER := preload("res://scenes/world/weather/cloud.gdshader")
@@ -17,6 +17,7 @@ var _rig : Node3D                         # moves along +X with the plane
 var _plane : Node3D
 var _cam : Camera3D
 var _time := 0.0
+var _cam_scale := 1.0
 var _font : SystemFont
 var _font_bold : SystemFont
 var _loading : Label
@@ -44,7 +45,7 @@ func _process(delta: float) -> void:
 	_plane.position.y = sin(_time * 0.5) * 1.5
 	_plane.set_controls(sin(_time * 0.4) * 0.3, -cos(_time * 0.27) * 0.4, 0.0, 0.85)
 	var a := -0.5 + sin(_time * 0.07) * 0.55
-	_cam.position = Vector3(sin(a) * 15.0 - 2.0, 3.0 + sin(_time * 0.11) * 1.5, cos(a) * 15.0)
+	_cam.position = Vector3(sin(a) * 15.0 - 2.0, 3.0 + sin(_time * 0.11) * 1.5, cos(a) * 15.0) * _cam_scale
 	_cam.look_at(_rig.global_position + Vector3(-1.0, 0.5, 0.0) + _plane.position)
 
 # ---------------------------------------------------------------------------
@@ -98,15 +99,24 @@ func _build_diorama() -> void:
 
 	_rig = Node3D.new()
 	add_child(_rig)
-	_plane = Node3D.new()
-	_plane.set_script(Spitfire)
-	_plane.start_gear_up = true
-	_rig.add_child(_plane)
+	_spawn_plane()
 	_cam = Camera3D.new()
 	_cam.fov = 55.0
 	_cam.h_offset = -6.0          # frame the plane on the right, clear of the menu
 	_cam.far = 300000.0
 	_rig.add_child(_cam)
+
+## (Re)build the diorama aircraft for the selected type
+func _spawn_plane() -> void:
+	if is_instance_valid(_plane):
+		_plane.queue_free()
+	var t : Dictionary = AircraftTypes.TYPES[GameSettings.aircraft]
+	_plane = Node3D.new()
+	_plane.set_script(load(t.model))
+	_plane.start_gear_up = true
+	_rig.add_child(_plane)
+	var k : float = t.camera[0] / 20.0
+	_cam_scale = k
 
 ## A long stretch of white chalk cliffs with green downland on top
 func _build_cliffs(sea_y: float) -> void:
@@ -231,7 +241,7 @@ func _build_ui() -> void:
 	layer.add_child(shade)
 
 	var col := VBoxContainer.new()
-	col.position = Vector2(200, 230)
+	col.position = Vector2(200, 150)
 	col.custom_minimum_size = Vector2(1300, 0)
 	col.add_theme_constant_override("separation", 14)
 	layer.add_child(col)
@@ -241,8 +251,21 @@ func _build_ui() -> void:
 	col.add_child(title)
 	col.add_child(_label("BATTLE OF BRITAIN  ·  SUMMER 1940", 46, ACCENT, true))
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 90)
+	spacer.custom_minimum_size = Vector2(0, 50)
 	col.add_child(spacer)
+
+	col.add_child(_label("AIRCRAFT", 34, TXT_DIM, true))
+	var ac_row := HBoxContainer.new()
+	ac_row.add_theme_constant_override("separation", 24)
+	col.add_child(ac_row)
+	var ac_group := ButtonGroup.new()
+	var ac_hint := _label(AircraftTypes.TYPES[GameSettings.aircraft].desc, 27, TXT_DIM)
+	for key in AircraftTypes.ORDER:
+		ac_row.add_child(_aircraft_button(key, ac_group, ac_hint))
+	col.add_child(ac_hint)
+	var spacer_a := Control.new()
+	spacer_a.custom_minimum_size = Vector2(0, 30)
+	col.add_child(spacer_a)
 
 	col.add_child(_label("WEATHER", 34, TXT_DIM, true))
 	var grid := GridContainer.new()
@@ -256,8 +279,22 @@ func _build_ui() -> void:
 	for w in order:
 		grid.add_child(_weather_card(w, group))
 
+	var spacer_s := Control.new()
+	spacer_s.custom_minimum_size = Vector2(0, 30)
+	col.add_child(spacer_s)
+	col.add_child(_label("MAP SCALE", 34, TXT_DIM, true))
+	var scale_row := HBoxContainer.new()
+	scale_row.add_theme_constant_override("separation", 24)
+	col.add_child(scale_row)
+	var scale_group := ButtonGroup.new()
+	var scale_hint := _label("", 27, TXT_DIM)
+	for opt in GameSettings.MAP_SCALES:
+		var b := _scale_button(opt, scale_group, scale_hint)
+		scale_row.add_child(b)
+	col.add_child(scale_hint)
+
 	var spacer2 := Control.new()
-	spacer2.custom_minimum_size = Vector2(0, 70)
+	spacer2.custom_minimum_size = Vector2(0, 50)
 	col.add_child(spacer2)
 
 	var row := HBoxContainer.new()
@@ -340,6 +377,56 @@ func _weather_card(w: int, group: ButtonGroup) -> Button:
 			name_l.add_theme_color_override("font_color", TXT))
 	if b.button_pressed:
 		name_l.add_theme_color_override("font_color", ACCENT)
+	return b
+
+func _aircraft_button(key: String, group: ButtonGroup, hint: Label) -> Button:
+	var t : Dictionary = AircraftTypes.TYPES[key]
+	var b := Button.new()
+	b.toggle_mode = true
+	b.button_group = group
+	b.text = t.short
+	b.custom_minimum_size = Vector2(404, 84)
+	b.add_theme_font_override("font", _font_bold)
+	b.add_theme_font_size_override("font_size", 34)
+	b.add_theme_stylebox_override("normal", _box(Color(0.05, 0.07, 0.10, 0.55), Color(1, 1, 1, 0.12), 42, 2))
+	b.add_theme_stylebox_override("hover", _box(Color(0.10, 0.13, 0.17, 0.7), Color(1, 1, 1, 0.3), 42, 2))
+	b.add_theme_stylebox_override("pressed", _box(Color(0.12, 0.11, 0.06, 0.75), ACCENT, 42, 4))
+	b.add_theme_stylebox_override("hover_pressed", _box(Color(0.15, 0.14, 0.08, 0.8), ACCENT, 42, 4))
+	b.add_theme_stylebox_override("focus", _box(Color(0, 0, 0, 0), Color(1, 1, 1, 0.7), 42, 3))
+	b.add_theme_color_override("font_color", TXT)
+	b.add_theme_color_override("font_pressed_color", ACCENT)
+	b.add_theme_color_override("font_hover_pressed_color", ACCENT)
+	b.button_pressed = GameSettings.aircraft == key
+	b.toggled.connect(func(on: bool):
+		if on:
+			GameSettings.aircraft = key
+			hint.text = t.desc
+			_spawn_plane())
+	return b
+
+func _scale_button(opt: Array, group: ButtonGroup, hint: Label) -> Button:
+	var b := Button.new()
+	b.toggle_mode = true
+	b.button_group = group
+	b.text = "%s  %d%%" % [opt[1], int(round(opt[0] * 100.0))]
+	b.custom_minimum_size = Vector2(404, 84)
+	b.add_theme_font_override("font", _font_bold)
+	b.add_theme_font_size_override("font_size", 32)
+	b.add_theme_stylebox_override("normal", _box(Color(0.05, 0.07, 0.10, 0.55), Color(1, 1, 1, 0.12), 42, 2))
+	b.add_theme_stylebox_override("hover", _box(Color(0.10, 0.13, 0.17, 0.7), Color(1, 1, 1, 0.3), 42, 2))
+	b.add_theme_stylebox_override("pressed", _box(Color(0.12, 0.11, 0.06, 0.75), ACCENT, 42, 4))
+	b.add_theme_stylebox_override("hover_pressed", _box(Color(0.15, 0.14, 0.08, 0.8), ACCENT, 42, 4))
+	b.add_theme_stylebox_override("focus", _box(Color(0, 0, 0, 0), Color(1, 1, 1, 0.7), 42, 3))
+	b.add_theme_color_override("font_color", TXT)
+	b.add_theme_color_override("font_pressed_color", ACCENT)
+	b.add_theme_color_override("font_hover_pressed_color", ACCENT)
+	b.button_pressed = is_equal_approx(GameSettings.map_scale, opt[0])
+	if b.button_pressed:
+		hint.text = opt[2]
+	b.toggled.connect(func(on: bool):
+		if on:
+			GameSettings.map_scale = opt[0]
+			hint.text = opt[2])
 	return b
 
 func _start() -> void:

@@ -9,6 +9,8 @@ func _ready() -> void:
 	add_to_group("origin_container")    # plane, camera, bullets and effects live here
 	WorldOrigin.focus = plane           # keep the scene centred on the player
 	camera.target = plane
+	camera.follow_distance = plane.camera_distance
+	camera.follow_height = plane.camera_height
 	hud.plane = plane
 	hud.camera = camera
 

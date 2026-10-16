@@ -13,7 +13,7 @@ extends Node3D
 ## world - WorldOrigin, so the scene stays centred on the player.  This node
 ## and the scenery node are origin containers.
 
-const DoverGeo     := preload("res://scenes/world/dover/dover_geo.gd")
+const GeoData      := preload("res://scenes/world/geo/geo_data.gd")
 const DoverScenery := preload("res://scenes/world/dover/dover_scenery.gd")
 const TileBuilder  := preload("res://scenes/world/dover/tile_builder.gd")
 const TERRAIN_SHADER := preload("res://scenes/world/dover/terrain.gdshader")
@@ -24,7 +24,7 @@ const MAX_LEVEL    := 4               ## 96 km → 6 km leaves (120 m cells)
 const SPLIT_K      := 2.0             ## split when closer than K × tile size
 const ROOT_RADIUS  := 420000.0        ## terrain reaches past the horizon
 const RIB_FINE     := 15000.0         ## full-detail cliffs (with collision) within
-const RIB_FAR      := 130000.0        ## coarse cliffs within
+const RIB_FAR      := 80000.0         ## coarse cliffs within
 const UPDATE_EVERY := 0.2
 const MAX_JOBS     := 8               ## tiles building at once
 const FRAME_BUDGET_MS := 4.0          ## time per frame for adding finished pieces
@@ -44,8 +44,9 @@ var _jobs := {}              ## key → WorkerThreadPool task id
 var _done : Array = []       ## [key, data, is_ribbon] finished by workers
 var _mutex := Mutex.new()
 
-var _coasts : Array = []     ## [points, normals, is_france] per coast
-var _pieces : Array = []     ## [coast index, start, end, centre (Vector2), radius]
+var _pieces : Array = []     ## [coastline, s0, s1, centre (Vector2), radius]
+var _piece_cells := {}       ## Vector2i -> Array of piece indices
+const PIECE_CELL := 8000.0
 var _rib_ready := {}         ## Vector3i(piece, lod, 0) → Node3D
 var _rib_shown := {}
 var _rib_jobs := {}
@@ -53,12 +54,16 @@ var _rib_jobs := {}
 var _sea : MeshInstance3D
 var _sea_body : StaticBody3D
 var _clock := 0.0
+var _fading := {}            ## tile node -> appear (0..1) for towns fading in
+var _instant := true         ## first build: no fade
+const FADE_TIME := 1.1
 var stats := {"tiles_built": 0, "max_frame_ms": 0.0}
 
 func _ready() -> void:
 	add_to_group("origin_container")
+	add_to_group("world_map")          # the HUD map finds the geography here
 	var t0 := Time.get_ticks_msec()
-	geo = DoverGeo.new()
+	geo = GeoData.new(GameSettings.map_scale)
 	builder = TileBuilder.new(geo, TERRAIN_SHADER)
 	builder.root_size = ROOT_SIZE
 	_build_coasts()
@@ -69,13 +74,15 @@ func _ready() -> void:
 	for k in _wanted_tiles(focus):
 		_request_tile(k)
 	for k in _wanted_ribbons(focus):
-		_request_ribbon(k)
+		if k.y == 0:              # nearby full-detail cliffs now; distant ones stream in
+			_request_ribbon(k)
 	for id in _jobs.values() + _rib_jobs.values():
 		WorkerThreadPool.wait_for_task_completion(id)
 	_jobs.clear()
 	_rib_jobs.clear()
 	_collect(INF)
 	_apply(focus)
+	_instant = false
 
 	var scenery := Node3D.new()
 	scenery.set_script(DoverScenery)
@@ -110,6 +117,7 @@ func _process(delta: float) -> void:
 		_clock = UPDATE_EVERY
 		_apply(focus)
 	_collect(FRAME_BUDGET_MS)
+	_update_fades(delta)
 	stats.max_frame_ms = maxf(stats.max_frame_ms, (Time.get_ticks_usec() - t0) / 1000.0)
 
 ## Ground height for spawning objects (world coords; sea level over water).
@@ -217,6 +225,10 @@ func _apply(focus: Vector3) -> void:
 			_place(n)
 			add_child(n)
 			_shown[k] = true
+			if n.get_meta("has_buildings", false):
+				_set_appear(n, 1.0 if _instant else 0.0)
+				if not _instant:
+					_fading[n] = 0.0
 
 	# Nearest missing tiles first
 	missing.sort_custom(func(a, b): return _tile_distance(a, focus) < _tile_distance(b, focus))
@@ -227,6 +239,27 @@ func _apply(focus: Vector3) -> void:
 
 	_apply_ribbons(focus)
 	_evict(focus, wanted)
+
+## Town buildings dissolve in while the ground's painted roofs fade out
+func _set_appear(tile: Node3D, a: float) -> void:
+	var bmat = tile.get_meta("building_mat", null)
+	if bmat:
+		(bmat as ShaderMaterial).set_shader_parameter("appear", a)
+	for c in tile.get_children():
+		if c is MeshInstance3D and c.name == "Ground":
+			((c as MeshInstance3D).material_override as ShaderMaterial).set_shader_parameter("buildings_shown", a)
+
+func _update_fades(delta: float) -> void:
+	for n in _fading.keys():
+		if not is_instance_valid(n) or not (n as Node3D).is_inside_tree():
+			_fading.erase(n)
+			continue
+		var a : float = minf(_fading[n] + delta / FADE_TIME, 1.0)
+		_set_appear(n, smoothstep(0.0, 1.0, a))
+		if a >= 1.0:
+			_fading.erase(n)
+		else:
+			_fading[n] = a
 
 func _request_tile(k: Vector3i) -> void:
 	if _jobs.has(k) or _ready_tiles.has(k):
@@ -279,26 +312,28 @@ func _evict(focus: Vector3, wanted: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 
 func _build_coasts() -> void:
-	for is_france in [false, true]:
-		var line : Array = geo.coast_polyline(is_france, TileBuilder.RIBBON_STEP)
-		var pts : PackedVector2Array = line[0]
-		if pts.size() < 2:
-			continue
-		var ci := _coasts.size()
-		_coasts.append([pts, line[1], is_france])
-		var start := 0
-		while start < pts.size() - 1:
-			var end := mini(start + TileBuilder.RIBBON_PIECE, pts.size() - 1)
-			var centre := (pts[start] + pts[end]) * 0.5
-			var radius := pts[start].distance_to(pts[end]) * 0.5 + 500.0
-			_pieces.append([ci, start, end, centre, radius])
-			start = end
+	var length := TileBuilder.RIBBON_STEP * TileBuilder.RIBBON_PIECE
+	_pieces = geo.coast_pieces(length)
+	for i in range(_pieces.size()):
+		var c : Vector2 = _pieces[i][3]
+		var key := Vector2i(floori(c.x / PIECE_CELL), floori(c.y / PIECE_CELL))
+		if not _piece_cells.has(key):
+			_piece_cells[key] = []
+		_piece_cells[key].append(i)
 
 func _wanted_ribbons(focus: Vector3) -> Dictionary:
 	var wanted := {}
 	var f2 := Vector2(focus.x, focus.z)
 	var dy := maxf(focus.y - 100.0, 0.0)
-	for i in range(_pieces.size()):
+	var reach := int(ceil(RIB_FAR / PIECE_CELL)) + 1
+	var fc := Vector2i(floori(f2.x / PIECE_CELL), floori(f2.y / PIECE_CELL))
+	var near : Array = []
+	for cz in range(fc.y - reach, fc.y + reach + 1):
+		for cx in range(fc.x - reach, fc.x + reach + 1):
+			var key := Vector2i(cx, cz)
+			if _piece_cells.has(key):
+				near.append_array(_piece_cells[key])
+	for i in near:
 		var p : Array = _pieces[i]
 		var d := maxf(f2.distance_to(p[3]) - p[4], 0.0)
 		d = sqrt(d * d + dy * dy)
@@ -315,8 +350,11 @@ func _request_ribbon(k: Vector3i) -> void:
 
 func _ribbon_job(k: Vector3i) -> void:
 	var p : Array = _pieces[k.x]
-	var c : Array = _coasts[p[0]]
-	var data : Dictionary = builder.ribbon_data(c[0], c[1], p[1], p[2], c[2], k.y)
+	var step := TileBuilder.RIBBON_STEP
+	var line : Array = geo.sample_piece(p[0], p[1], p[2], step)
+	var pts : PackedVector2Array = line[0]
+	var data : Dictionary = builder.ribbon_data(pts, line[1], 0, pts.size() - 1, p[0], k.y,
+		int(round(p[1] / step)))
 	_mutex.lock()
 	_done.append([k, data, true])
 	_mutex.unlock()

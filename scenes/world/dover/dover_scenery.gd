@@ -14,7 +14,9 @@ const HOUSE_RANGE  := 12000.0
 
 var _vc_mat : StandardMaterial3D
 var _convoy : Node3D
-var _convoy_x := -6000.0          # world x of the convoy
+var _convoy_t := 0.0              # metres travelled along the convoy route
+var _convoy_a := Vector2.ZERO     # route start / end (world x, z)
+var _convoy_b := Vector2.ZERO
 var _balloons : Array = []
 var _clock := 0.0
 
@@ -36,10 +38,11 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_clock += delta
 	if is_instance_valid(_convoy):
-		_convoy_x += 5.0 * delta              # ~10 knots westward down-Channel
-		if _convoy_x > 40000.0:
-			_convoy_x = -40000.0
-		_convoy.position.x = _convoy_x - WorldOrigin.origin_x
+		# ~10 knots down-Channel along the route, then round again
+		var route := _convoy_b - _convoy_a
+		_convoy_t = fmod(_convoy_t + 5.0 * delta, route.length())
+		var w := _convoy_a + route.normalized() * _convoy_t
+		_convoy.position = WorldOrigin.to_scene(Vector3(w.x, 0.8, w.y))
 	for b in _balloons:
 		var node : Node3D = b[0]
 		var phase : float = b[1]
@@ -176,14 +179,15 @@ static func _house_mesh() -> Mesh:
 # Landmarks
 # ---------------------------------------------------------------------------
 
-## Point at a given distance inland of the English (or French) coast.
-func _coast_pt(x: float, inland: float, france := false) -> Vector3:
-	var z : float
-	if france:
-		z = map.geo.france_coast_z(x) - inland
-	else:
-		z = map.geo.england_coast_z(x) + inland
-	return Vector3(x, _ground(x, z), z)
+## Ground point at a real latitude / longitude (world coordinates)
+func _ll(lat: float, lon: float) -> Vector3:
+	var p : Vector2 = map.geo.latlon_to_game(lat, lon)
+	return Vector3(p.x, _ground(p.x, p.y), p.y)
+
+## Sea-level point at a real latitude / longitude
+func _ll_sea(lat: float, lon: float) -> Vector3:
+	var p : Vector2 = map.geo.latlon_to_game(lat, lon)
+	return Vector3(p.x, 0.0, p.y)
 
 func _build_airfield() -> void:
 	# RAF fighter station: grass field with a tarmac strip, hangars and a watch office
@@ -214,22 +218,27 @@ func _build_harbour() -> void:
 	var stone := Color(0.62, 0.61, 0.58)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var c := func(x: float, out: float) -> Vector3:
-		return Vector3(x, 0.0, map.geo.england_coast_z(x) - out)
-	_wall(st, c.call(2900.0, -80.0), c.call(2350.0, 1150.0), 16.0, stone)   # Admiralty Pier
-	_wall(st, c.call(2150.0, 1300.0), c.call(-200.0, 1250.0), 14.0, stone)  # Southern Breakwater
-	_wall(st, c.call(-650.0, -80.0), c.call(-450.0, 950.0), 14.0, stone)    # Eastern Arm
+	var pier_root := _ll_sea(51.1132, 1.3050)
+	var pier_head := _ll_sea(51.1048, 1.3160)
+	var bw_west := _ll_sea(51.1052, 1.3195)
+	var bw_east := _ll_sea(51.1088, 1.3400)
+	var arm_root := _ll_sea(51.1225, 1.3352)
+	var arm_head := _ll_sea(51.1112, 1.3440)
+	_wall(st, pier_root, pier_head, 16.0, stone)    # Admiralty Pier
+	_wall(st, bw_west, bw_east, 14.0, stone)        # Southern Breakwater
+	_wall(st, arm_root, arm_head, 14.0, stone)      # Eastern Arm
 	# Pier-head lighthouses
-	for p in [c.call(2350.0, 1150.0), c.call(2150.0, 1300.0), c.call(-200.0, 1250.0)]:
+	for p in [pier_head, bw_west, bw_east, arm_head]:
 		_cylinder(st, p + Vector3(0, 7.5, 0), 3.0, 2.5, 12.0, 8, Color(0.9, 0.9, 0.88))
 	_commit(st, "DoverHarbour")
 
 	# Ships at anchor in the harbour
 	for i in range(5):
-		var p : Vector3 = c.call(1700.0 - i * 380.0, 700.0 + (i % 2) * 220.0)
+		var p : Vector3 = _ll_sea(51.1100 + (i % 2) * 0.003, 1.3180 + i * 0.0045)
 		var ship := _ship_mesh(Color(0.30, 0.31, 0.33), 55.0 + i * 6.0)
 		ship.position = Vector3(p.x, 0.8, p.z)
 		ship.rotation.y = 0.3 * i
+		ship.add_to_group("ships")
 		add_child(ship)
 
 ## Long stone breakwater between two points at sea level
@@ -241,7 +250,7 @@ func _wall(st: SurfaceTool, a: Vector3, b: Vector3, width: float, col: Color) ->
 
 func _build_castle() -> void:
 	# Dover Castle on the hill east of the town
-	var base := _coast_pt(-500.0, 650.0)
+	var base := _ll(51.1294, 1.3214)
 	var stone := Color(0.80, 0.76, 0.66)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -280,7 +289,7 @@ func _build_radar() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var steel := Color(0.42, 0.44, 0.46)
-	var base := _coast_pt(-2700.0, 1700.0)
+	var base := _ll(51.1442, 1.3395)
 	for i in range(4):
 		var p := Vector3(i * 140.0 - 210.0, 0.0, 0.0)
 		p.y = _ground(base.x + p.x, base.z) - base.y - 1.0
@@ -311,8 +320,8 @@ func _lattice(st: SurfaceTool, base: Vector3, height: float, width: float, col: 
 func _build_lighthouses() -> void:
 	var white := Color(0.95, 0.95, 0.93)
 	var specs : Array = [
-		[_coast_pt(-5600.0, 160.0), 21.0],              # South Foreland
-		[_coast_pt(-2200.0, 120.0, true), 28.0],        # Cap Gris-Nez
+		[_ll(51.1403, 1.3712), 21.0],                   # South Foreland
+		[_ll(50.8697, 1.5836), 28.0],                   # Cap Gris-Nez
 	]
 	for s in specs:
 		var st := SurfaceTool.new()
@@ -337,9 +346,7 @@ func _build_balloons() -> void:
 	var cable_mat := StandardMaterial3D.new()
 	cable_mat.albedo_color = Color(0.15, 0.15, 0.15)
 	for i in range(14):
-		var x := rng.randf_range(-1800.0, 3600.0)
-		var inland := rng.randf_range(-1200.0, 1800.0)
-		var gp := _coast_pt(x, inland)
+		var gp := _ll(rng.randf_range(51.100, 51.140), rng.randf_range(1.285, 1.350))
 		var alt := rng.randf_range(450.0, 1300.0)
 		var b := MeshInstance3D.new()
 		b.name = "BarrageBalloon"
@@ -423,7 +430,12 @@ func _build_convoy() -> void:
 	# A coastal convoy steaming down-Channel — the Kanalkampf of July 1940
 	_convoy = Node3D.new()
 	_convoy.name = "Convoy"
-	_convoy.position = Vector3(-6000.0, 0.8, -11000.0)
+	# Route: off Cap Gris-Nez, down past Dungeness toward Beachy Head
+	_convoy_a = map.geo.latlon_to_game(51.03, 1.60)
+	_convoy_b = map.geo.latlon_to_game(50.70, 0.40)
+	_convoy_t = 4000.0
+	var route := _convoy_b - _convoy_a
+	_convoy.rotation.y = atan2(-route.y, route.x)     # ships face local +X
 	add_child(_convoy)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 7
@@ -439,6 +451,7 @@ func _build_convoy() -> void:
 		var ship := _ship_mesh(Color(0.26, 0.27, 0.29).lerp(Color(0.35, 0.30, 0.26), rng.randf()), length)
 		ship.position = Vector3(-rowi * 600.0 + rng.randf_range(-40, 40), 0, (col - 1) * 450.0)
 		ship.rotation.y = PI * 0.5      # bows toward +X (west)
+		ship.add_to_group("ships")
 		_convoy.add_child(ship)
 		var wake := MeshInstance3D.new()
 		var q := PlaneMesh.new()

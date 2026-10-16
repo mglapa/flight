@@ -7,6 +7,7 @@ extends CanvasLayer
 ## (ball markings, gunsight, warnings).
 
 const NAVBALL_SHADER := preload("res://scenes/ui/navball.gdshader")
+const MapView := preload("res://scenes/ui/map_view.gd")
 
 const REF := Vector2(2560, 1440)
 const PANEL_H := 250.0
@@ -44,6 +45,7 @@ var _s := 1.0
 var _origin := Vector2.ZERO
 var _sweep := 0.0
 var _blink := 0.0
+var _map : Control
 
 func _ready() -> void:
 	_font = _make_font(500)
@@ -68,6 +70,13 @@ func _ready() -> void:
 	_front = _layer("Front")
 	_front.draw.connect(_draw_front)
 
+	_map = Control.new()
+	_map.name = "Map"
+	_map.set_script(MapView)
+	_map.font = _font
+	_map.font_bold = _font_bold
+	add_child(_map)
+
 func _make_font(weight: int) -> Font:
 	var f := SystemFont.new()
 	f.font_names = PackedStringArray(["Bahnschrift", "DIN Alternate", "Segoe UI", "Helvetica Neue", "Arial"])
@@ -86,6 +95,7 @@ func _layer(name_: String) -> Control:
 func _process(delta: float) -> void:
 	_sweep = fmod(_sweep + delta * TAU / 2.5, TAU)
 	_blink += delta
+	_map.plane = plane
 	if not is_instance_valid(plane):
 		_ball.visible = false
 		return
@@ -199,8 +209,8 @@ func _draw_back() -> void:
 	_caption(_back, _ball_centre().x, top, "ATTITUDE")
 	_caption(_back, _heading_centre().x, top, "HEADING")
 
-	_text(_back, Vector2(vp.x - 14.0 * _s, 26.0 * _s), "%d FPS" % Engine.get_frames_per_second(),
-		13.0, Color(1, 1, 1, 0.45), HORIZONTAL_ALIGNMENT_RIGHT)
+	_text(_back, Vector2(14.0 * _s, 26.0 * _s), "%d FPS" % Engine.get_frames_per_second(),
+		13.0, Color(1, 1, 1, 0.45))
 
 func _draw_flight_data(rect: Rect2) -> void:
 	var x0 := rect.position.x + 24.0 * _s
@@ -308,7 +318,7 @@ func _draw_radar(c: Vector2, r: float) -> void:
 # Heading card
 # ---------------------------------------------------------------------------
 
-## Compass heading in degrees: north = +Z, east = -X (see dover_geo.gd)
+## Compass heading in degrees: north = +Z, east = -X (see geo_data.gd)
 func _heading_deg() -> float:
 	var f := -plane.global_transform.basis.z
 	return fposmod(rad_to_deg(atan2(-f.x, f.z)), 360.0)
@@ -407,11 +417,14 @@ func _draw_status(rect: Rect2) -> void:
 	var gmax : int = plane.get("GUN_AMMO_MAX") if "GUN_AMMO_MAX" in plane else 1
 	var can : int = plane.get("cannon_ammo") if "cannon_ammo" in plane else 0
 	var cmax2 : int = plane.get("CANNON_AMMO_MAX") if "CANNON_AMMO_MAX" in plane else 1
+	var gl : String = plane.get("gun_label") if "gun_label" in plane else ".303 MG"
+	var cl : String = plane.get("cannon_label") if "cannon_label" in plane else "20 MM"
 	var rows := [
 		["FUEL", "%d%%" % int(fr * 100.0), fr, fcol, 0],
-		[".303 MG", str(gun), float(gun) / gmax, Color(0.86, 0.88, 0.90) if gun > gmax * 0.2 else WARN, 8],
-		["20 MM", str(can), float(can) / cmax2, Color(1.0, 0.62, 0.30) if can > cmax2 * 0.2 else WARN, 6],
+		[gl, str(gun), float(gun) / maxi(gmax, 1), Color(0.86, 0.88, 0.90) if gun > gmax * 0.2 else WARN, 8],
 	]
+	if cmax2 > 0:
+		rows.append([cl, str(can), float(can) / cmax2, Color(1.0, 0.62, 0.30) if can > cmax2 * 0.2 else WARN, 6])
 	for i in range(rows.size()):
 		var row : Array = rows[i]
 		var y := rect.position.y + (40.0 + i * 68.0) * _s

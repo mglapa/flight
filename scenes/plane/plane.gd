@@ -1,5 +1,6 @@
 extends Node3D
-## Semi-realistic WW2 fighter flight model (Spitfire Mk V class).
+## Semi-realistic fighter flight model.  The aircraft type (model, mass,
+## thrust, gear, guns, fuel...) comes from aircraft_types.gd at spawn.
 ##
 ## All physics computed manually for full control and stability.
 ## Uses real aerodynamic principles: lift from AoA, drag polar, weathervane
@@ -46,36 +47,47 @@ extends Node3D
 const AIR_DENSITY: float = 1.225  # kg/m³ at sea level
 const GRAVITY: float = 9.81
 
-# Wheel contact points in local space — must match plane.tscn geometry
-const WHEEL_L = Vector3(-1.60, -1.50, -2.0)   # left main gear
-const WHEEL_R = Vector3( 1.60, -1.50, -2.0)   # right main gear
-const WHEEL_T = Vector3(  0.0, -1.20,  3.8)   # tail wheel
+const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
+
+## Aircraft type key in aircraft_types.gd (set before add_child, or taken
+## from GameSettings.aircraft)
+var aircraft_type := ""
+var aircraft_name := ""
+
+# Wheel contact points in local space (third point: tail or nose wheel)
+var WHEEL_L : Vector3 = Vector3(-1.60, -1.50, -2.0)   # left main gear
+var WHEEL_R : Vector3 = Vector3( 1.60, -1.50, -2.0)   # right main gear
+var WHEEL_T : Vector3 = Vector3(  0.0, -1.20,  3.8)   # tail wheel
 
 # Gun muzzle positions in local space (2 per wing, near leading edge)
-const GUN_POSITIONS: Array = [
+var GUN_POSITIONS: Array = [
 	Vector3(-4.5, 0.0, -0.8),   # left outer
 	Vector3(-3.0, 0.0, -0.8),   # left inner
 	Vector3( 3.0, 0.0, -0.8),   # right inner
 	Vector3( 4.5, 0.0, -0.8),   # right outer
 ]
-const BULLET_SPEED      := 800.0   # m/s — .303 Browning muzzle velocity
-const FIRE_INTERVAL     := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
-const GUN_AMMO_MAX      := 2000    # total .303 rounds across all four guns
+var BULLET_SPEED      := 800.0   # m/s — .303 Browning muzzle velocity
+var FIRE_INTERVAL     := 0.02    # seconds between shots (750 RPM × 4 guns = 50 rds/s)
+var GUN_AMMO_MAX      := 2000    # total .303 rounds across all four guns
 const CONVERGENCE_DIST  := 400.0   # m — historical RAF ~250 yards (229 m) standard
 const GUN_SPREAD        := 0.005   # rad — ~4 mil dispersion per shot
 
 # Hispano Mk II 20 mm cannons — one per wing
-const CANNON_POSITIONS : Array = [
+var CANNON_POSITIONS : Array = [
 	Vector3(-6.0, 0.0, -0.5),   # left wing cannon
 	Vector3( 6.0, 0.0, -0.5),   # right wing cannon
 ]
-const CANNON_SPEED    := 820.0          # m/s — 20 mm shell muzzle velocity
-const CANNON_INTERVAL := 60.0 / 1400.0 # s between shots (700 RPM × 2 cannons)
+var CANNON_SPEED    := 820.0          # m/s — 20 mm shell muzzle velocity
+var CANNON_INTERVAL := 60.0 / 1400.0 # s between shots (700 RPM × 2 cannons)
 const CANNON_DAMAGE   := 3             # HP deducted per shell hit
-const CANNON_AMMO_MAX := 150            # total 20 mm rounds (75 per cannon)
+var CANNON_AMMO_MAX := 150            # total 20 mm rounds (75 per cannon)
 
 # Fuel — 1200 units = ~20 minutes at full throttle
-const MAX_FUEL        := 1200.0
+var MAX_FUEL        := 1200.0
+var gun_label := ".303 MG"
+var cannon_label := "20 MM"
+var camera_distance := 20.0
+var camera_height := 5.0
 const BASE_FUEL_DRAIN := 1.0    # units/s at throttle 1.0
 const FUEL_LEAK_RATE  := 3.0    # extra units/s when fuel tank fully destroyed
 
@@ -90,8 +102,8 @@ var cannon_ammo   : int   = CANNON_AMMO_MAX
 var fuel : float = MAX_FUEL
 
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
-var _spitfire_script = preload("res://scenes/plane/spitfire/spitfire_model.gd")
 var _model : Node3D = null
+var _profile : Dictionary = {}
 
 # -- Aero coefficients --
 ## Lift curve slope per radian (typical finite wing)
@@ -154,10 +166,11 @@ var _cannon_shot_ages : Array[int] = []   # cannon shots (separate synthesis)
 
 func _ready() -> void:
 	add_to_group("player")
+	_apply_profile()
 	aspect_ratio = wing_span * wing_span / wing_area
 	throttle = 0.7
-	# Start at ~290 km/h, airborne
-	velocity = -global_transform.basis.z * 80.0
+	# Start airborne at the type's cruising speed
+	velocity = -global_transform.basis.z * float(_profile.get("start_speed", 80.0))
 	# Put the hitbox on layer 2 so terrain/water raycasts (mask=1) never hit it
 	_hitbox_body.collision_layer = 2
 	_hitbox_body.collision_mask  = 2
@@ -165,14 +178,55 @@ func _ready() -> void:
 	_setup_gun_audio()
 	_load_model()
 
+func _apply_profile() -> void:
+	if aircraft_type == "":
+		aircraft_type = GameSettings.aircraft
+	if not AircraftTypes.TYPES.has(aircraft_type):
+		aircraft_type = "spitfire"
+	_profile = AircraftTypes.TYPES[aircraft_type]
+	var p := _profile
+	aircraft_name = p.name
+	aircraft_mass = p.mass
+	wing_area = p.wing_area
+	wing_span = p.span
+	max_thrust = p.thrust
+	cd_0 = p.cd0
+	stall_alpha_deg = p.stall_deg
+	pitch_power = p.pitch_power
+	roll_power = p.roll_power
+	yaw_power = p.yaw_power
+	WHEEL_L = p.wheels[0]
+	WHEEL_R = p.wheels[1]
+	WHEEL_T = p.wheels[2]
+	GUN_POSITIONS = p.guns
+	FIRE_INTERVAL = p.gun_interval
+	GUN_AMMO_MAX = p.gun_ammo
+	BULLET_SPEED = p.gun_speed
+	gun_label = p.gun_label
+	CANNON_POSITIONS = p.cannons
+	CANNON_INTERVAL = p.cannon_interval
+	CANNON_AMMO_MAX = p.cannon_ammo
+	CANNON_SPEED = p.cannon_speed
+	cannon_label = p.cannon_label
+	MAX_FUEL = p.fuel
+	gun_ammo = GUN_AMMO_MAX
+	cannon_ammo = CANNON_AMMO_MAX
+	fuel = MAX_FUEL
+	camera_distance = p.camera[0]
+	camera_height = p.camera[1]
+	var shape := get_node_or_null("Hitbox/HitboxShape") as CollisionShape3D
+	if shape and shape.shape is BoxShape3D:
+		var box := (shape.shape as BoxShape3D).duplicate() as BoxShape3D
+		box.size = p.hitbox
+		shape.shape = box
+
 func _load_model() -> void:
-	# Low-poly Spitfire Mk I, built in code.  Its main wheels sit at model
-	# z = -1.1, so shift it forward to put them on WHEEL_L / WHEEL_R.
+	# Low-poly model built in code; offset so its wheels sit on WHEEL_L / WHEEL_R
 	_model = Node3D.new()
-	_model.name = "Spitfire"
-	_model.set_script(_spitfire_script)
+	_model.name = _profile.short
+	_model.set_script(load(_profile.model))
 	_model.start_gear_up = true          # spawns airborne
-	_model.position = Vector3(0.0, 0.0, WHEEL_L.z + 1.1)
+	_model.position = _profile.model_offset
 	add_child(_model)
 
 func _setup_gun_audio() -> void:
@@ -576,7 +630,8 @@ func _physics_process(delta: float) -> void:
 		var main_above := ((wl.y - gnd_l) + (wr.y - gnd_r)) * 0.5
 		var tail_above := wt.y - gnd_t
 		var pitch_err  := main_above - tail_above
-		pitch_rate += -pitch_err * 8.0 * delta
+		# The third wheel may be a tail wheel (behind) or a nose wheel (ahead)
+		pitch_rate += -pitch_err * 8.0 * delta * signf(WHEEL_T.z)
 
 		# Heavy angular damping on the ground (landing gear absorbs oscillation)
 		roll_rate  *= maxf(0.0, 1.0 - 12.0 * delta)

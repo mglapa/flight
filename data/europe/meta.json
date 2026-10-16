@@ -1,0 +1,30 @@
+{
+ "projection": "azimuthal_equidistant",
+ "lat0": 51.1279,
+ "lon0": 1.3134,
+ "radius": 6371008.8,
+ "axes": "x = -east, z = north (metres)",
+ "x_min": -980000.0,
+ "z_min": -370000.0,
+ "res": 250.0,
+ "width": 6160,
+ "height": 5200,
+ "raw_sizes": {
+  "elevation": 64064000,
+  "coastdist": 64064000,
+  "town": 32032000,
+  "lakedist": 64064000,
+  "coast": 605620,
+  "rivers": 413676
+ },
+ "map": {
+  "file": "map.png",
+  "res": 500.0,
+  "east_min": -560000.0,
+  "north_max": 930000.0
+ },
+ "sources": [
+  "AWS Terrain Tiles (Terrarium) z9",
+  "Natural Earth 10m (public domain)"
+ ]
+}
