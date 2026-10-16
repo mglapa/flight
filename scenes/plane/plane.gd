@@ -90,6 +90,8 @@ var cannon_ammo   : int   = CANNON_AMMO_MAX
 var fuel : float = MAX_FUEL
 
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
+var _spitfire_script = preload("res://scenes/plane/spitfire/spitfire_model.gd")
+var _model : Node3D = null
 
 # -- Aero coefficients --
 ## Lift curve slope per radian (typical finite wing)
@@ -164,19 +166,14 @@ func _ready() -> void:
 	_load_model()
 
 func _load_model() -> void:
-	# Hide the placeholder box meshes defined in plane.tscn
-	for child_name in ["Fuselage", "Wings", "Tail", "TailFin", "WheelLeft", "WheelRight", "TailWheel"]:
-		var n := get_node_or_null(child_name)
-		if n:
-			n.visible = false
-
-	var packed : PackedScene = load("res://assets/fighter_v1.glb")
-	if packed == null:
-		return
-	var model : Node3D = packed.instantiate()
-	# If the model faces the wrong direction, uncomment and adjust:
-	# model.rotation_degrees.y = 180.0
-	add_child(model)
+	# Low-poly Spitfire Mk I, built in code.  Its main wheels sit at model
+	# z = -1.1, so shift it forward to put them on WHEEL_L / WHEEL_R.
+	_model = Node3D.new()
+	_model.name = "Spitfire"
+	_model.set_script(_spitfire_script)
+	_model.start_gear_up = true          # spawns airborne
+	_model.position = Vector3(0.0, 0.0, WHEEL_L.z + 1.1)
+	add_child(_model)
 
 func _setup_gun_audio() -> void:
 	var gen := AudioStreamGenerator.new()
@@ -297,6 +294,9 @@ func _physics_process(delta: float) -> void:
 	var throttle_down := Input.get_action_strength("throttle_down")
 
 	throttle = clampf(throttle + (throttle_up - throttle_down) * throttle_response * delta, 0.0, 1.0)
+	if _model:
+		# roll_input is inverted (see ROLL below): -roll_input = roll right
+		_model.set_controls(pitch_input / stick_sensitivity, -roll_input, yaw_input, throttle)
 
 	# ========================
 	# GUNS & CANNON

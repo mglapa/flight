@@ -42,10 +42,10 @@ const FIRE_INTERVAL := 0.18       # s  — fire rate per gunner position
 # ── Gunner definitions ────────────────────────────────────────────────────────
 # Local-space muzzle position for each gunner (nose, dorsal, ventral, tail)
 const GUNNER_POSITIONS : Array = [
-	Vector3(0.0,  0.5, -7.5),   # 0  Nose     — forward hemisphere
-	Vector3(0.0,  2.0,  0.5),   # 1  Dorsal   — upper hemisphere
-	Vector3(0.0, -1.5,  0.5),   # 2  Ventral  — lower hemisphere
-	Vector3(0.0,  0.5,  7.5),   # 3  Tail     — rearward hemisphere
+	Vector3( 0.08,  0.12, -8.5),  # 0  Nose     — forward hemisphere (nose glazing MG)
+	Vector3( 0.0,   1.35,  3.3),  # 1  Dorsal   — upper hemisphere (B-Stand cupola)
+	Vector3(-0.15, -1.2,   3.5),  # 2  Ventral  — lower hemisphere (gondola)
+	Vector3( 0.0,   0.4,   8.4),  # 3  Tail     — rearward hemisphere
 ]
 # The hemisphere each gunner covers: dot(dir_to_player, axis) > 0 to engage
 const GUNNER_AXES : Array = [
@@ -96,7 +96,8 @@ var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _bullet_script     = preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
-var _mats     : Array = []   # all mesh materials — used by set_cloud_alpha()
+var _he111_script = preload("res://scenes/enemies/he111/he111_model.gd")
+var _model    : Node3D = null
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -232,6 +233,9 @@ func _update_bomber(delta: float) -> void:
 	var eff_roll_power      := ROLL_POWER      * (1.0 - wing_dmg)
 	var eff_yaw_stability   := YAW_STABILITY   * (1.0 - rudd_dmg)
 
+	if _model:
+		# Same conventions as the player: -ai_roll = roll right
+		_model.set_controls(ai_pitch, -ai_roll, 0.0, _throttle)
 	var pitch_accel : float =  ai_pitch * eff_pitch_power * effectiveness
 	var roll_accel  : float = -ai_roll  * eff_roll_power  * effectiveness
 	var yaw_accel   : float = 0.0
@@ -382,90 +386,16 @@ func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 # ── Mesh ──────────────────────────────────────────────────────────────────────
 
 func set_cloud_alpha(alpha: float) -> void:
-	for m in _mats:
-		var mat := m as StandardMaterial3D
-		mat.transparency   = (BaseMaterial3D.TRANSPARENCY_ALPHA
-							  if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED)
-		mat.albedo_color.a = alpha
+	if _model:
+		_model.set_cloud_alpha(alpha)
 
 func _build_mesh() -> void:
-	var fus_mat := StandardMaterial3D.new()
-	fus_mat.albedo_color = Color(0.30, 0.33, 0.24)   # RLM 70/71 dark green-grey
-	fus_mat.roughness    = 0.85
-	_mats.append(fus_mat)
+	# Low-poly He 111 H, built in code.  Always airborne, so no undercarriage.
+	_model = Node3D.new()
+	_model.name = "He111"
+	_model.set_script(_he111_script)
+	add_child(_model)
 
-	var wing_mat := StandardMaterial3D.new()
-	wing_mat.albedo_color = Color(0.27, 0.30, 0.21)
-	wing_mat.roughness    = 0.85
-	_mats.append(wing_mat)
-
-	var engine_mat := StandardMaterial3D.new()
-	engine_mat.albedo_color = Color(0.20, 0.20, 0.19)
-	engine_mat.roughness    = 0.9
-	_mats.append(engine_mat)
-
-	var turret_mat := StandardMaterial3D.new()
-	turret_mat.albedo_color = Color(0.55, 0.52, 0.38)
-	turret_mat.roughness    = 0.6
-	_mats.append(turret_mat)
-
-	# Main fuselage — 14 m long
-	var fuselage := MeshInstance3D.new()
-	var fm := BoxMesh.new(); fm.size = Vector3(1.6, 2.2, 14.0)
-	fuselage.mesh = fm; fuselage.material_override = fus_mat
-	add_child(fuselage)
-
-	# Nose / greenhouse cockpit section — extends forward, slightly lower
-	var nose := MeshInstance3D.new()
-	var nm := BoxMesh.new(); nm.size = Vector3(1.8, 1.8, 4.0)
-	nose.mesh = nm; nose.material_override = fus_mat
-	nose.position = Vector3(0.0, -0.1, -7.0)
-	add_child(nose)
-
-	# Wings — 22 m span
-	var wings := MeshInstance3D.new()
-	var wm := BoxMesh.new(); wm.size = Vector3(22.0, 0.22, 3.0)
-	wings.mesh = wm; wings.material_override = wing_mat
-	add_child(wings)
-
-	# Left engine nacelle
-	var left_eng := MeshInstance3D.new()
-	var lem := BoxMesh.new(); lem.size = Vector3(0.9, 0.9, 3.8)
-	left_eng.mesh = lem; left_eng.material_override = engine_mat
-	left_eng.position = Vector3(-5.0, -0.9, -0.5)
-	add_child(left_eng)
-
-	# Right engine nacelle
-	var right_eng := MeshInstance3D.new()
-	var rem := BoxMesh.new(); rem.size = Vector3(0.9, 0.9, 3.8)
-	right_eng.mesh = rem; right_eng.material_override = engine_mat
-	right_eng.position = Vector3(5.0, -0.9, -0.5)
-	add_child(right_eng)
-
-	# Horizontal tail stabilizer
-	var h_stab := MeshInstance3D.new()
-	var hm := BoxMesh.new(); hm.size = Vector3(8.0, 0.16, 2.0)
-	h_stab.mesh = hm; h_stab.material_override = wing_mat
-	h_stab.position = Vector3(0.0, 0.0, 6.5)
-	add_child(h_stab)
-
-	# Vertical tail fin
-	var v_fin := MeshInstance3D.new()
-	var vfm := BoxMesh.new(); vfm.size = Vector3(0.16, 2.5, 2.2)
-	v_fin.mesh = vfm; v_fin.material_override = fus_mat
-	v_fin.position = Vector3(0.0, 1.4, 6.8)
-	add_child(v_fin)
-
-	# Gunner turret blister at each position (small sphere)
-	var gunner_labels := ["Nose", "Dorsal", "Ventral", "Tail"]
-	for i in range(4):
-		var turret := MeshInstance3D.new()
-		var sm := SphereMesh.new()
-		sm.radius = 0.45; sm.height = 0.9
-		turret.mesh = sm; turret.material_override = turret_mat
-		turret.position = GUNNER_POSITIONS[i]
-		turret.name = gunner_labels[i] + "Turret"
-		add_child(turret)
 
 # ── Collision ─────────────────────────────────────────────────────────────────
 

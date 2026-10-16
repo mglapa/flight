@@ -93,7 +93,8 @@ var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _bullet_script     = preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
-var _mats     : Array = []   # all mesh materials — used by set_cloud_alpha()
+var _bf109_script = preload("res://scenes/enemies/bf109/bf109_model.gd")
+var _model    : Node3D = null
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
@@ -310,6 +311,9 @@ func _update_chase(delta: float, escort_slot: Vector3 = Vector3.INF) -> void:
 	var eff_yaw_stability   := YAW_STABILITY   * (1.0 - rudd_dmg)
 
 	# ── Angular accelerations — identical to player ───────────────────────────
+	if _model:
+		# Same conventions as the player: -ai_roll = roll right
+		_model.set_controls(ai_pitch, -ai_roll, 0.0, _throttle)
 	var pitch_accel : float =  ai_pitch * eff_pitch_power * effectiveness
 	var roll_accel  : float = -ai_roll  * eff_roll_power  * effectiveness
 	var yaw_accel   : float = 0.0
@@ -451,31 +455,15 @@ func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 func set_cloud_alpha(alpha: float) -> void:
-	for m in _mats:
-		var mat := m as StandardMaterial3D
-		mat.transparency      = (BaseMaterial3D.TRANSPARENCY_ALPHA
-								 if alpha < 0.99 else BaseMaterial3D.TRANSPARENCY_DISABLED)
-		mat.albedo_color.a    = alpha
+	if _model:
+		_model.set_cloud_alpha(alpha)
 
 func _build_mesh() -> void:
-	var packed : PackedScene = load("res://assets/fighter_v1.glb")
-	if packed == null:
-		return
-	var model : Node3D = packed.instantiate()
-	# If the model faces the wrong direction, uncomment and adjust:
-	# model.rotation_degrees.y = 180.0
-	add_child(model)
-
-	# Collect per-instance material duplicates so set_cloud_alpha() can
-	# dim each enemy independently without affecting shared GLB resources.
-	for mi in model.find_children("*", "MeshInstance3D", true, false):
-		var mesh_inst := mi as MeshInstance3D
-		for i in range(mesh_inst.mesh.get_surface_count()):
-			var mat := mesh_inst.mesh.surface_get_material(i)
-			if mat is StandardMaterial3D:
-				var m := mat.duplicate() as StandardMaterial3D
-				mesh_inst.set_surface_override_material(i, m)
-				_mats.append(m)
+	# Low-poly Bf 109 E, built in code.  Always airborne, so no undercarriage.
+	_model = Node3D.new()
+	_model.name = "Bf109"
+	_model.set_script(_bf109_script)
+	add_child(_model)
 
 func _build_collision() -> void:
 	var body := StaticBody3D.new()

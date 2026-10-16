@@ -1,0 +1,15 @@
+
+ - Add clouds
+ - Add better texture for ground and water
+ - Add 'home base' where fighters can get health, fuel, and ammo
+ - Add anti aircraft guns with flak.
+ - Add aircraft carriers in ocean
+ - Add different sky colors, sunset/sunrise, etc.
+ - Improve enemy fighter AI
+ - Improve stall behavior
+ - Add roads, buildings, farmland, trees, rivers to ground.
+ - Improve scenery - cliffs, moutains
+ - Make wing damage asymmetric - if left wing takes more damage than right wing, it will fly unevenly.
+ - Add tanks that drive on the ground and get into ground battles.
+
+

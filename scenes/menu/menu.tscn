@@ -2,5 +2,5 @@
 
 [ext_resource type="Script" path="res://scenes/menu/menu.gd" id="1"]
 
-[node name="Menu" type="Node"]
+[node name="Menu" type="Node3D"]
 script = ExtResource("1")
