@@ -19,8 +19,10 @@ const RAMP_IN    := 220.0
 const RAMP_OUT   := -60.0
 const CAP_WIDTH  := 440.0
 
-## Core map (detailed terrain, cliffs, scenery)
+## Area holding the hand-placed towns and villages
 const CORE_HALF  := 48000.0
+## Coastlines (and their cliff meshes) are generated out to here
+const COAST_EXTENT := 190000.0
 
 const _TAB_MIN  := -200000.0
 const _TAB_STEP := 20.0
@@ -170,15 +172,15 @@ func england_d(x: float, z: float) -> float:
 func france_d(x: float, z: float) -> float:
 	return (_tab(_fra_z, x) - z) * _tab(_fra_cos, x)
 
-## Polyline along a coast, resampled by arc length, within the core map.
+## Polyline along a coast, resampled by arc length, within |x|, |z| < extent.
 ## Returns [points: PackedVector2Array, inland normals: PackedVector2Array]
-func coast_polyline(is_france: bool, spacing: float) -> Array:
+func coast_polyline(is_france: bool, spacing: float, extent := COAST_EXTENT) -> Array:
 	var tab := _fra_z if is_france else _eng_z
 	var raw := PackedVector2Array()
-	var x := -CORE_HALF - 1000.0
-	while x <= CORE_HALF + 1000.0:
+	var x := -extent
+	while x <= extent:
 		var z := _tab(tab, x)
-		if absf(z) < CORE_HALF + 1000.0:
+		if absf(z) < extent:
 			raw.append(Vector2(x, z))
 		x += 5.0
 
@@ -410,34 +412,18 @@ func downland(d: float, x: float) -> float:
 	var on_chalk := smoothstep(-13500.0, -11500.0, x) * (1.0 - smoothstep(10000.0, 13500.0, x))
 	return on_chalk * (1.0 - smoothstep(150.0, 550.0, d))
 
-## Land-use image over the core: R = woods, G = town, B = downland.
-func build_landuse(size: int) -> Image:
-	var data := PackedByteArray()
-	data.resize(size * size * 4)
-	var cell := CORE_HALF * 2.0 / size
-	var i := 0
-	for zi in range(size):
-		var z := -CORE_HALF + (zi + 0.5) * cell
-		for xi in range(size):
-			var x := -CORE_HALF + (xi + 0.5) * cell
-			var de := england_d(x, z)
-			var df := france_d(x, z)
-			var d := maxf(de, df)
-			var wood := 0.0
-			var town := 0.0
-			var down := 0.0
-			if d > -50.0:
-				var h := land_height(x, z)
-				town = town_density(x, z)
-				wood = wood_density(x, z, d, h) * (1.0 - smoothstep(0.05, 0.25, town))
-				if de >= df:
-					down = downland(de, x)
-				if Vector2(x, z).distance_to(airfield_pos) < AIRFIELD_R:
-					wood = 0.0
-					town = 0.0
-			data[i]     = int(wood * 255.0)
-			data[i + 1] = int(town * 255.0)
-			data[i + 2] = int(down * 255.0)
-			data[i + 3] = 255
-			i += 4
-	return Image.create_from_data(size, size, false, Image.FORMAT_RGBA8, data)
+## Land use at a point: r = woods, g = town, b = downland (0..1).
+func landuse_at(x: float, z: float) -> Color:
+	var de := england_d(x, z)
+	var df := france_d(x, z)
+	var d := maxf(de, df)
+	if d <= -50.0:
+		return Color(0, 0, 0, 1)
+	var h := land_height(x, z)
+	var town := town_density(x, z)
+	var wood := wood_density(x, z, d, h) * (1.0 - smoothstep(0.05, 0.25, town))
+	var down := downland(de, x) if de >= df else 0.0
+	if Vector2(x, z).distance_to(airfield_pos) < AIRFIELD_R:
+		wood = 0.0
+		town = 0.0
+	return Color(wood, town, down, 1.0)

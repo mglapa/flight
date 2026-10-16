@@ -31,6 +31,9 @@ var sun : DirectionalLight3D
 var kind : int = W.FAIR_CUMULUS
 
 var _rng := RandomNumberGenerator.new()
+var _wrapped : Array = []         ## [node, period]: kept within ±period/2 of the camera
+var _followers : Array = []       ## nodes that simply follow the camera (sheets, veils)
+var _wrap_clock := 0.0
 var _cloud_mat : ShaderMaterial
 var _dark_mat : ShaderMaterial
 var _deck_base := -INF            ## overcast: lighting dims below this height
@@ -39,6 +42,7 @@ var _sun_energy := 1.3
 var _ambient := 1.0
 
 func _ready() -> void:
+	add_to_group("origin_container")
 	_rng.seed = Time.get_ticks_usec()
 	_cloud_mat = _cloud_material(0.32)
 	_dark_mat = _cloud_material(0.18)
@@ -50,14 +54,29 @@ func _ready() -> void:
 		W.HIGH_CLOUD:   _high_cloud()
 		_:              _fair()
 
-func _process(_delta: float) -> void:
-	if _deck_base == -INF or sun == null:
-		return
-	# Under the overcast the sun is hidden: dim, cool, flat light
+func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
 	if cam == null:
 		return
-	var y := cam.global_position.y
+	var cp := cam.global_position
+	for f in _followers:
+		(f as Node3D).position = Vector3(cp.x, (f as Node3D).position.y, cp.z)
+	# Clouds wrap around the camera so the sky never runs out
+	_wrap_clock -= delta
+	if _wrap_clock <= 0.0:
+		_wrap_clock = 0.5
+		for w in _wrapped:
+			var n : Node3D = w[0]
+			var period : float = w[1]
+			var d := n.position - cp
+			if absf(d.x) > period * 0.5:
+				n.position.x -= signf(d.x) * period
+			if absf(d.z) > period * 0.5:
+				n.position.z -= signf(d.z) * period
+	if _deck_base == -INF or sun == null:
+		return
+	# Under the overcast the sun is hidden: dim, cool, flat light
+	var y := cp.y
 	var below := 1.0 - smoothstep(_deck_base, _deck_top + 150.0, y)
 	sun.light_energy = lerpf(_sun_energy, _sun_energy * 0.22, below)
 	env.ambient_light_energy = lerpf(_ambient, _ambient * 0.6, below)
@@ -127,7 +146,9 @@ func _storms() -> void:
 	# Cumulonimbus: one guaranteed in view ahead of the spawn, the rest around the map
 	_add_cumulonimbus(Vector2(-9000, -16000))
 	for i in range(4):
-		_add_cumulonimbus(_random_point(OUTER * 0.6, 12000.0))
+		var p := _random_point(INNER)
+		if p.length() > 12000.0:
+			_add_cumulonimbus(p)
 
 func _overcast() -> void:
 	_sky(Color(0.42, 0.50, 0.62), Color(0.68, 0.72, 0.77), 0.000013, 1.2,
@@ -151,10 +172,12 @@ func _high_cloud() -> void:
 # Placement helpers
 # ---------------------------------------------------------------------------
 
-func _random_point(radius: float, min_radius := 0.0) -> Vector2:
-	var r := sqrt(_rng.randf_range((min_radius / radius) ** 2, 1.0)) * radius
-	var a := _rng.randf() * TAU
-	return Vector2(cos(a), sin(a)) * r
+## Random point in the square ±half (squares tile seamlessly when wrapped)
+func _random_point(half: float) -> Vector2:
+	return Vector2(_rng.randf_range(-half, half), _rng.randf_range(-half, half))
+
+func _period(half: float) -> float:
+	return half * 2.0
 
 func _blocks_spawn(blobs: Array) -> bool:
 	for b in blobs:
@@ -168,9 +191,9 @@ func _blocks_spawn(blobs: Array) -> bool:
 	return false
 
 func _spawn_cloud(blobs: Array, base: float, base_col: Color, top_col: Color,
-		detail: int, mat: Material = null) -> void:
+		detail: int, mat: Material = null, period := INNER * 2.0) -> Node3D:
 	if blobs.is_empty() or _blocks_spawn(blobs):
-		return
+		return null
 	var c := Node3D.new()
 	c.set_script(Cloud)
 	c.blobs = blobs
@@ -181,6 +204,8 @@ func _spawn_cloud(blobs: Array, base: float, base_col: Color, top_col: Color,
 	c.material = mat if mat else _cloud_mat
 	c.seed_ = _rng.randi()
 	add_child(c)
+	_wrapped.append([c, period])
+	return c
 
 # ---------------------------------------------------------------------------
 # Cloud types
@@ -210,15 +235,15 @@ func _cumulus_blobs(p: Vector2, base: float, width: float, height: float) -> Arr
 		blobs.append([Vector3(p.x + o.x, y, p.y + o.y), Vector3(r, r * 0.95, r)])
 	return blobs
 
-func _scatter_cumulus(count: int, radius: float, base: float, width_range: Vector2,
-		height_ratio: Vector2, detail: int, min_radius := 0.0,
+func _scatter_cumulus(count: int, half: float, base: float, width_range: Vector2,
+		height_ratio: Vector2, detail: int, _unused := 0.0,
 		base_col := Color(0.70, 0.74, 0.81)) -> void:
 	for i in range(count):
-		var p := _random_point(radius, min_radius)
+		var p := _random_point(half)
 		var w := _rng.randf_range(width_range.x, width_range.y)
 		var h := w * _rng.randf_range(height_ratio.x, height_ratio.y)
 		var b := base + _rng.randf_range(-80.0, 80.0)
-		_spawn_cloud(_cumulus_blobs(p, b, w, h), b, base_col, Color.WHITE, detail)
+		_spawn_cloud(_cumulus_blobs(p, b, w, h), b, base_col, Color.WHITE, detail, null, _period(half))
 
 ## Cumulus congestus: a cauliflower column of many overlapping bulges that
 ## narrows with height and leans slightly with the wind shear
@@ -265,10 +290,11 @@ func _add_cumulonimbus(p: Vector2) -> void:
 		var r := width * _rng.randf_range(0.3, 0.45)
 		var y := top - r * 0.25 - absf(along) / (width * 1.6) * 600.0
 		blobs.append([Vector3(p.x + o.x, y, p.y + o.y), Vector3(r * 1.5, r * 0.25, r * 1.2)])
-	_spawn_cloud(blobs, base, Color(0.36, 0.39, 0.46), Color(0.97, 0.97, 0.98), 1, _dark_mat)
-	_rain_shaft(p, base, width * 0.45)
+	var cb := _spawn_cloud(blobs, base, Color(0.36, 0.39, 0.46), Color(0.97, 0.97, 0.98), 1, _dark_mat)
+	if cb:
+		_rain_shaft(cb, p, base, width * 0.45)
 
-func _rain_shaft(p: Vector2, base: float, radius: float) -> void:
+func _rain_shaft(cloud: Node3D, p: Vector2, base: float, radius: float) -> void:
 	var mat := ShaderMaterial.new()
 	mat.shader = VEIL_SHADER
 	mat.set_shader_parameter("color", Color(0.42, 0.45, 0.50))
@@ -286,9 +312,9 @@ func _rain_shaft(p: Vector2, base: float, radius: float) -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = cyl
 	mi.material_override = mat
-	mi.position = Vector3(p.x, base * 0.5, p.y)
+	mi.position = Vector3(p.x, base * 0.5, p.y) - cloud.position   # rides along with its cloud
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(mi)
+	cloud.add_child(mi)
 
 ## Stratocumulus: broken deck of flattened lumps, tiled for culling, with a
 ## continuous sheet beyond the detailed area so the deck reaches the horizon
@@ -321,7 +347,7 @@ func _stratocumulus_deck(base: float, top: float, coverage: float) -> void:
 			_spawn_cloud(blobs, base, Color(0.55, 0.58, 0.64), Color(0.90, 0.91, 0.94), 1)
 			u += tile
 		t += tile
-	_deck_sheet(mid, INNER, OUTER * 3.0)
+	_deck_sheet(mid, INNER - 4000.0, OUTER * 3.0)
 
 func _deck_sheet(y: float, hole: float, extent: float) -> void:
 	# Square ring with a hole over the detailed deck, both faces visible
@@ -347,11 +373,12 @@ func _deck_sheet(y: float, hole: float, extent: float) -> void:
 	mi.material_override = _cloud_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+	_followers.append(mi)
 
 ## Altocumulus: patches of small flattened puffs in loose rows
 func _altocumulus(patches: int, lo: float, hi: float) -> void:
 	for i in range(patches):
-		var p := _random_point(INNER * 1.2)
+		var p := _random_point(INNER)
 		if i < 4:
 			p = Vector2(_rng.randf_range(-9000, 9000), _rng.randf_range(-22000, -5000))
 		var y := _rng.randf_range(lo, hi)
@@ -372,21 +399,30 @@ func _altocumulus(patches: int, lo: float, hi: float) -> void:
 					Vector3(r * 1.3, r * 0.45, r)])
 		_spawn_cloud(blobs, y - 40.0, Color(0.78, 0.81, 0.87), Color.WHITE, 0)
 
-## Cirrus: long translucent streaks drawn out by high winds, soft-edged
+## Cirrus: long translucent streaks drawn out by high winds, soft-edged.
+## Built as a 4 x 4 grid of chunk meshes so each chunk can wrap on its own.
 func _cirrus(count: int, lo: float, hi: float) -> void:
 	var mat := ShaderMaterial.new()
 	mat.shader = VEIL_SHADER
 	mat.set_shader_parameter("color", Color(1.0, 1.0, 1.0))
 	mat.set_shader_parameter("alpha", 0.6)
 	mat.set_shader_parameter("vertex_alpha", true)
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var chunks := 4
+	var chunk := OUTER * 2.0 / chunks
+	var tools := {}
 	var wind := Vector2(1.0, 0.3).normalized()
 	var across := Vector2(-wind.y, wind.x)
 	for i in range(count):
 		var p := _random_point(OUTER)
 		if i < count / 4:
 			p = Vector2(_rng.randf_range(-15000, 15000), _rng.randf_range(-30000, 0))   # some overhead
+		var ck := Vector2i(clampi(int((p.x + OUTER) / chunk), 0, chunks - 1), clampi(int((p.y + OUTER) / chunk), 0, chunks - 1))
+		var centre := Vector2(-OUTER + (ck.x + 0.5) * chunk, -OUTER + (ck.y + 0.5) * chunk)
+		if not tools.has(ck):
+			var st0 := SurfaceTool.new()
+			st0.begin(Mesh.PRIMITIVE_TRIANGLES)
+			tools[ck] = [st0, centre]
+		var st : SurfaceTool = tools[ck][0]
 		var y := _rng.randf_range(lo, hi)
 		var length := _rng.randf_range(4000, 12000)
 		var width := _rng.randf_range(500, 1500)
@@ -396,7 +432,7 @@ func _cirrus(count: int, lo: float, hi: float) -> void:
 		for sg in range(segs + 1):
 			var f := float(sg) / segs
 			var bend := curve * length * (f - 0.5) * (f - 0.5) * 2.0
-			var c2 := p + wind * (f - 0.5) * length + across * bend
+			var c2 := p - centre + wind * (f - 0.5) * length + across * bend
 			var w := width * pow(sin(PI * f), 0.7) + 20.0       # tapered "mares' tails"
 			var yy := y + f * 150.0
 			var fade := sin(PI * f)
@@ -411,11 +447,15 @@ func _cirrus(count: int, lo: float, hi: float) -> void:
 				for idx in [0, 1, 2, 0, 2, 3]:
 					st.set_color(Color(1, 1, 1, quad[idx][1]))
 					st.add_vertex(quad[idx][0])
-	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
-	mi.material_override = mat
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(mi)
+	for ck in tools:
+		var mi := MeshInstance3D.new()
+		mi.mesh = (tools[ck][0] as SurfaceTool).commit()
+		mi.material_override = mat
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var centre : Vector2 = tools[ck][1]
+		mi.position = Vector3(centre.x, 0.0, centre.y)
+		add_child(mi)
+		_wrapped.append([mi, OUTER * 2.0])
 
 ## Cirrostratus: a thin milky veil over the whole sky
 func _veil(y: float, alpha: float) -> void:
@@ -431,3 +471,4 @@ func _veil(y: float, alpha: float) -> void:
 	mi.position.y = y
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
+	_followers.append(mi)

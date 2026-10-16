@@ -1,426 +1,393 @@
 extends Node3D
-## Stylised Strait of Dover — builds terrain, chalk cliffs, sea and scenery.
+## Streaming map manager for the stylised Strait of Dover.
 ##
-## Terrain is two layers sharing one material:
-##   * a regular height grid (CELL m) over the core map, plus a coarse outer
-##     ring reaching the horizon;
-##   * a high-resolution "ribbon" mesh that follows each coastline exactly,
-##     giving sheer chalk cliffs, shingle beaches and the cliff-top edge.
-## The grid dips under the ribbon near the coast, so cliffs stay crisp no
-## matter how coarse the grid is.
+## Terrain is a quadtree of square tiles: 96 km roots split down to 6 km
+## leaves (120 m cells) near the focus point, each tile 50 x 50 cells, with
+## skirts hiding cracks between levels.  Cliff ribbons stream as coastline
+## pieces in two levels of detail.  Pieces are built on WorkerThreadPool
+## threads by tile_builder.gd, cached, and swapped in on the main thread.
+## A coarse tile stays visible until every finer tile replacing it is ready,
+## so the ground never has holes.
+##
+## Positions: everything is generated in world coordinates and placed at
+## world - WorldOrigin, so the scene stays centred on the player.  This node
+## and the scenery node are origin containers.
 
 const DoverGeo     := preload("res://scenes/world/dover/dover_geo.gd")
 const DoverScenery := preload("res://scenes/world/dover/dover_scenery.gd")
+const TileBuilder  := preload("res://scenes/world/dover/tile_builder.gd")
 const TERRAIN_SHADER := preload("res://scenes/world/dover/terrain.gdshader")
 const SEA_SHADER     := preload("res://scenes/world/dover/sea.gdshader")
 
-const CELL        := 120.0
-const GRID        := 800                   # cells across the core (96 km)
-const CHUNK       := 100                   # cells per render chunk
-const OUTER_HALF  := 420000.0              # land/sea reach well past the horizon
-const OUTER_CELL0 := 3000.0                # outer ring spacing at the core edge…
-const OUTER_GROW  := 1.07                  # …growing by this factor per step
-const RIBBON_STEP := 14.0                  # metres between cliff samples
-const RIBBON_PIECE := 160                  # samples per ribbon mesh
-const LOD_STEP    := 4                     # coarse meshes keep every Nth vertex
-const LOD_DIST    := 20000.0               # switch to coarse meshes beyond this
-const SKIRT       := 60.0                  # skirts hide cracks between LODs
-const LANDUSE_SIZE := 768
-const SEA_LEVEL   := 0.8
+const ROOT_SIZE    := 96000.0
+const MAX_LEVEL    := 4               ## 96 km → 6 km leaves (120 m cells)
+const SPLIT_K      := 2.0             ## split when closer than K × tile size
+const ROOT_RADIUS  := 420000.0        ## terrain reaches past the horizon
+const RIB_FINE     := 15000.0         ## full-detail cliffs (with collision) within
+const RIB_FAR      := 130000.0        ## coarse cliffs within
+const UPDATE_EVERY := 0.2
+const MAX_JOBS     := 8               ## tiles building at once
+const FRAME_BUDGET_MS := 4.0          ## time per frame for adding finished pieces
+const CACHE_MAX    := 900
+const SEA_LEVEL    := 0.8
+const SEA_SIZE     := 1100000.0
+
+## Where to centre the first build (world coords) before the player exists
+var initial_focus := Vector3(0, 4572, 1000)
 
 var geo
-var landuse_image : Image
-var terrain_material : ShaderMaterial
+var builder
 
-var _heights := PackedFloat32Array()
+var _ready_tiles := {}       ## key → detached-or-shown Node3D
+var _shown := {}             ## key → true, currently in the tree
+var _jobs := {}              ## key → WorkerThreadPool task id
+var _done : Array = []       ## [key, data, is_ribbon] finished by workers
+var _mutex := Mutex.new()
+
+var _coasts : Array = []     ## [points, normals, is_france] per coast
+var _pieces : Array = []     ## [coast index, start, end, centre (Vector2), radius]
+var _rib_ready := {}         ## Vector3i(piece, lod, 0) → Node3D
+var _rib_shown := {}
+var _rib_jobs := {}
+
+var _sea : MeshInstance3D
+var _sea_body : StaticBody3D
+var _clock := 0.0
+var stats := {"tiles_built": 0, "max_frame_ms": 0.0}
 
 func _ready() -> void:
+	add_to_group("origin_container")
 	var t0 := Time.get_ticks_msec()
 	geo = DoverGeo.new()
-	landuse_image = geo.build_landuse(LANDUSE_SIZE)
-	var t1 := Time.get_ticks_msec()
-	_make_terrain_material()
-	_build_core_grid()
-	_build_outer_ring()
-	var t2 := Time.get_ticks_msec()
-	_build_ribbon(false)
-	_build_ribbon(true)
+	builder = TileBuilder.new(geo, TERRAIN_SHADER)
+	builder.root_size = ROOT_SIZE
+	_build_coasts()
 	_build_sea()
-	var t3 := Time.get_ticks_msec()
+
+	# First build: everything needed around the spawn point, in parallel
+	var focus := initial_focus
+	for k in _wanted_tiles(focus):
+		_request_tile(k)
+	for k in _wanted_ribbons(focus):
+		_request_ribbon(k)
+	for id in _jobs.values() + _rib_jobs.values():
+		WorkerThreadPool.wait_for_task_completion(id)
+	_jobs.clear()
+	_rib_jobs.clear()
+	_collect(INF)
+	_apply(focus)
 
 	var scenery := Node3D.new()
 	scenery.set_script(DoverScenery)
 	scenery.name = "Scenery"
 	scenery.map = self
 	add_child(scenery)
-	print("Dover map built in %d ms (landuse %d, grid %d, cliffs %d, scenery %d)" % [
-		Time.get_ticks_msec() - t0, t1 - t0, t2 - t1, t3 - t2, Time.get_ticks_msec() - t3])
+	print("Dover map ready in %d ms (%d tiles, %d cliff pieces)" % [
+		Time.get_ticks_msec() - t0, _shown.size(), _rib_shown.size()])
 
-## Ground height for spawning objects (land surface, or sea level over water).
+func _exit_tree() -> void:
+	# Never free the map while workers still reference it
+	for id in _jobs.values() + _rib_jobs.values():
+		WorkerThreadPool.wait_for_task_completion(id)
+	_jobs.clear()
+	_rib_jobs.clear()
+	# Cached pieces outside the tree are not freed with it
+	for d in [_ready_tiles, _rib_ready]:
+		for n in d.values():
+			if is_instance_valid(n) and not (n as Node3D).is_inside_tree():
+				(n as Node3D).free()
+		d.clear()
+	_mutex.lock()
+	_done.clear()
+	_mutex.unlock()
+
+func _process(delta: float) -> void:
+	var t0 := Time.get_ticks_usec()
+	var focus := _focus_world()
+	_follow_sea(focus)
+	_clock -= delta
+	if _clock <= 0.0:
+		_clock = UPDATE_EVERY
+		_apply(focus)
+	_collect(FRAME_BUDGET_MS)
+	stats.max_frame_ms = maxf(stats.max_frame_ms, (Time.get_ticks_usec() - t0) / 1000.0)
+
+## Ground height for spawning objects (world coords; sea level over water).
 func surface_height(x: float, z: float) -> float:
 	return geo.surface_height(x, z)
 
-## Land-use sample at a world position: r = woods, g = town, b = downland.
-func landuse(x: float, z: float) -> Color:
-	var u := (x + DoverGeo.CORE_HALF) / (2.0 * DoverGeo.CORE_HALF) * LANDUSE_SIZE - 0.5
-	var v := (z + DoverGeo.CORE_HALF) / (2.0 * DoverGeo.CORE_HALF) * LANDUSE_SIZE - 0.5
-	if u < 0.0 or v < 0.0 or u >= LANDUSE_SIZE - 1 or v >= LANDUSE_SIZE - 1:
-		return Color(0, 0, 0, 0)
-	var xi := int(u)
-	var zi := int(v)
-	var tx := u - xi
-	var tz := v - zi
-	var a := landuse_image.get_pixel(xi, zi).lerp(landuse_image.get_pixel(xi + 1, zi), tx)
-	var b := landuse_image.get_pixel(xi, zi + 1).lerp(landuse_image.get_pixel(xi + 1, zi + 1), tx)
-	return a.lerp(b, tz)
+func _focus_world() -> Vector3:
+	var cam := get_viewport().get_camera_3d()
+	if cam:
+		return WorldOrigin.to_world(cam.global_position)
+	if is_instance_valid(WorldOrigin.focus):
+		return WorldOrigin.to_world(WorldOrigin.focus.global_position)
+	return initial_focus
+
+func _place(node: Node3D) -> void:
+	var w : Vector3 = node.get_meta("world_origin")
+	node.position = WorldOrigin.to_scene(w)
 
 # ---------------------------------------------------------------------------
-
-func _make_terrain_material() -> void:
-	terrain_material = ShaderMaterial.new()
-	terrain_material.shader = TERRAIN_SHADER
-	terrain_material.set_shader_parameter("landuse", ImageTexture.create_from_image(landuse_image))
-	terrain_material.set_shader_parameter("core_half", DoverGeo.CORE_HALF)
-	terrain_material.set_shader_parameter("airfield", geo.airfield_pos)
-	terrain_material.set_shader_parameter("airfield_r", DoverGeo.AIRFIELD_R)
-
-func _mesh_instance(arrays: Array, name_: String, lod := -1) -> MeshInstance3D:
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	var mi := MeshInstance3D.new()
-	mi.name = name_
-	mi.mesh = mesh
-	mi.material_override = terrain_material
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	if lod == 0:
-		mi.visibility_range_end = LOD_DIST
-	elif lod == 1:
-		mi.visibility_range_begin = LOD_DIST
-	add_child(mi)
-	return mi
-
-# ---------------------------------------------------------------------------
-# Core height grid
+# Quadtree selection
 # ---------------------------------------------------------------------------
 
-func _build_core_grid() -> void:
-	var n := GRID + 1
-	var half := GRID * CELL * 0.5
-	_heights.resize(n * n)
-	for zi in range(n):
-		var z := -half + zi * CELL
-		for xi in range(n):
-			_heights[zi * n + xi] = geo.grid_height(-half + xi * CELL, z)
+func _tile_size(level: int) -> float:
+	return ROOT_SIZE / float(1 << level)
 
-	for cz in range(GRID / CHUNK):
-		for cx in range(GRID / CHUNK):
-			_build_grid_chunk(cx * CHUNK, cz * CHUNK, half)
+func _tile_distance(key: Vector3i, focus: Vector3) -> float:
+	var s := _tile_size(key.z)
+	var x0 := key.x * s
+	var z0 := key.y * s
+	var dx := maxf(maxf(x0 - focus.x, focus.x - (x0 + s)), 0.0)
+	var dz := maxf(maxf(z0 - focus.z, focus.z - (z0 + s)), 0.0)
+	var dy := maxf(focus.y - 100.0, 0.0)
+	return sqrt(dx * dx + dz * dz + dy * dy)
 
-	# Collision matches the render grid exactly
-	var hms := HeightMapShape3D.new()
-	hms.map_width = n
-	hms.map_depth = n
-	hms.map_data  = _heights
-	var col := CollisionShape3D.new()
-	col.shape = hms
-	col.scale = Vector3(CELL, 1.0, CELL)
-	var body := StaticBody3D.new()
-	body.name = "TerrainCollision"
-	body.add_child(col)
-	add_child(body)
+func _wanted_tiles(focus: Vector3) -> Dictionary:
+	var wanted := {}
+	var ix0 := floori((focus.x - ROOT_RADIUS) / ROOT_SIZE)
+	var ix1 := floori((focus.x + ROOT_RADIUS) / ROOT_SIZE)
+	var iz0 := floori((focus.z - ROOT_RADIUS) / ROOT_SIZE)
+	var iz1 := floori((focus.z + ROOT_RADIUS) / ROOT_SIZE)
+	for iz in range(iz0, iz1 + 1):
+		for ix in range(ix0, ix1 + 1):
+			var k := Vector3i(ix, iz, 0)
+			if _tile_distance(k, focus) < ROOT_RADIUS:
+				_visit(k, focus, wanted)
+	return wanted
 
-func _build_grid_chunk(x0: int, z0: int, half: float) -> void:
-	var n := GRID + 1
-	var any_land := false
-	for j in range(CHUNK + 1):
-		for i in range(CHUNK + 1):
-			if _heights[(z0 + j) * n + x0 + i] > SEA_LEVEL - 1.0:
-				any_land = true
+func _visit(key: Vector3i, focus: Vector3, wanted: Dictionary) -> void:
+	if key.z < MAX_LEVEL and _tile_distance(key, focus) < SPLIT_K * _tile_size(key.z):
+		for c in range(4):
+			_visit(Vector3i(key.x * 2 + (c & 1), key.y * 2 + (c >> 1), key.z + 1), focus, wanted)
+	else:
+		wanted[key] = true
+
+static func _parent(k: Vector3i) -> Vector3i:
+	return Vector3i(k.x >> 1, k.y >> 1, k.z - 1)
+
+static func _is_descendant(d: Vector3i, k: Vector3i) -> bool:
+	if d.z <= k.z:
+		return false
+	var sh := d.z - k.z
+	return (d.x >> sh) == k.x and (d.y >> sh) == k.y
+
+## Decide which tiles to show: wanted tiles that are ready, otherwise
+## whatever is already on screen covering the same ground.
+func _apply(focus: Vector3) -> void:
+	var wanted := _wanted_tiles(focus)
+	var show := {}
+	var missing : Array = []
+	for k in wanted:
+		if _ready_tiles.has(k):
+			show[k] = true
+			continue
+		missing.append(k)
+		var a : Vector3i = k
+		var found := false
+		while a.z > 0:
+			a = _parent(a)
+			if _shown.has(a):
+				show[a] = true
+				found = true
 				break
-		if any_land:
+		if not found:
+			for d in _shown:
+				if _is_descendant(d, k):
+					show[d] = true
+	# A fallback ancestor covers its whole area: hide its descendants
+	for k in show.keys():
+		var a : Vector3i = k
+		while a.z > 0:
+			a = _parent(a)
+			if show.has(a):
+				show.erase(k)
+				break
+
+	for k in _shown.keys():
+		if not show.has(k):
+			var n : Node3D = _ready_tiles[k]
+			if n.get_parent() == self:
+				remove_child(n)
+			_shown.erase(k)
+	for k in show:
+		if not _shown.has(k):
+			var n : Node3D = _ready_tiles[k]
+			_place(n)
+			add_child(n)
+			_shown[k] = true
+
+	# Nearest missing tiles first
+	missing.sort_custom(func(a, b): return _tile_distance(a, focus) < _tile_distance(b, focus))
+	for k in missing:
+		if _jobs.size() >= MAX_JOBS:
 			break
-	if not any_land:
-		return   # open sea — the sea plane covers it
-	for lod in range(2):
-		var step := 1 if lod == 0 else LOD_STEP
-		var m := CHUNK / step + 1
-		var verts := PackedVector3Array()
-		verts.resize(m * m)
-		for j in range(m):
-			var zi := z0 + j * step
-			for i in range(m):
-				var xi := x0 + i * step
-				verts[j * m + i] = Vector3(-half + xi * CELL, _heights[zi * n + xi], -half + zi * CELL)
-		var arrays := _with_skirt(verts, m, _grid_indices(m, m))
-		_mesh_instance(arrays, "Terrain_%d_%d_lod%d" % [x0 / CHUNK, z0 / CHUNK, lod], lod)
+		_request_tile(k)
 
-## Adds a downward skirt around a w x w grid and returns mesh arrays.
-## Skirt vertices are tagged with COLOR.g = 1 so the shader never paints them
-## as cliff.  Normals are flat-shaded in the shader, so none are stored.
-static func _with_skirt(verts: PackedVector3Array, w: int, idx: PackedInt32Array) -> Array:
-	var cols := PackedColorArray()
-	cols.resize(verts.size())
-	cols.fill(Color(0, 0, 0, 1))
-	var ring := PackedInt32Array()
-	for i in range(w - 1):
-		ring.append(i)                              # south edge
-	for j in range(w - 1):
-		ring.append(j * w + w - 1)                  # east edge
-	for i in range(w - 1, 0, -1):
-		ring.append((w - 1) * w + i)                # north edge
-	for j in range(w - 1, 0, -1):
-		ring.append(j * w)                          # west edge
-	var base := verts.size()
-	for k in ring:
-		verts.append(verts[k] - Vector3(0, SKIRT, 0))
-		cols.append(Color(0, 1, 0, 1))
-	for r in range(ring.size()):
-		var a := ring[r]
-		var b := ring[(r + 1) % ring.size()]
-		var a2 := base + r
-		var b2 := base + (r + 1) % ring.size()
-		# both windings — skirts are seen from either side
-		idx.append_array([a, b, a2, b, b2, a2, a, a2, b, b, a2, b2])
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	arrays[Mesh.ARRAY_COLOR]  = cols
-	arrays[Mesh.ARRAY_INDEX]  = idx
-	return arrays
+	_apply_ribbons(focus)
+	_evict(focus, wanted)
 
-static func _grid_indices(w: int, h: int) -> PackedInt32Array:
-	var idx := PackedInt32Array()
-	idx.resize((w - 1) * (h - 1) * 6)
-	var ii := 0
-	for j in range(h - 1):
-		for i in range(w - 1):
-			var a := j * w + i
-			# Clockwise from above (Godot front faces)
-			idx[ii]     = a
-			idx[ii + 1] = a + 1
-			idx[ii + 2] = a + w
-			idx[ii + 3] = a + 1
-			idx[ii + 4] = a + w + 1
-			idx[ii + 5] = a + w
-			ii += 6
-	return idx
-
-# ---------------------------------------------------------------------------
-# Outer ring — coarse land and sea out to the horizon
-# ---------------------------------------------------------------------------
-
-func _build_outer_ring() -> void:
-	# Grid lines: exactly on the core edge, then progressively wider steps out
-	# to the horizon.  Inside the core there are only a few sunken lines.
-	var core := DoverGeo.CORE_HALF
-	var half_lines : Array = [core]
-	var step := OUTER_CELL0
-	while half_lines[-1] < OUTER_HALF:
-		half_lines.append(half_lines[-1] + step)
-		step *= OUTER_GROW
-	var coords : Array = []
-	for i in range(half_lines.size() - 1, -1, -1):
-		coords.append(-half_lines[i])
-	for f in [-0.5, 0.0, 0.5]:
-		coords.append(core * f)
-	coords.append_array(half_lines)
-
-	var m := coords.size()
-	var verts := PackedVector3Array()
-	var cols  := PackedColorArray()
-	verts.resize(m * m)
-	cols.resize(m * m)
-	for j in range(m):
-		var z : float = coords[j]
-		for i in range(m):
-			var x : float = coords[i]
-			var h : float = geo.grid_height(x, z)
-			# Inside the core this mesh is sunk out of sight below the detailed grid
-			if absf(x) < core - 1.0 and absf(z) < core - 1.0:
-				h = DoverGeo.SEA_FLOOR - 200.0
-			verts[j * m + i] = Vector3(x, h, z)
-			cols[j * m + i] = Color(0, 0, 0, 1)
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	arrays[Mesh.ARRAY_COLOR]  = cols
-	arrays[Mesh.ARRAY_INDEX]  = _grid_indices(m, m)
-	_mesh_instance(arrays, "OuterTerrain")
-
-# ---------------------------------------------------------------------------
-# Cliff ribbon
-# ---------------------------------------------------------------------------
-
-# Seaward profile rows: [d_cliff, h_cliff, d_beach, h_beach, shore]
-const _SEA_ROWS : Array = [
-	[-90.0, -24.0, -110.0, -24.0, 1.0],
-	[-45.0,  -3.5,  -70.0,  -4.0, 1.0],
-	[-24.0,  -0.6,  -42.0,  -0.9, 1.0],
-	[-14.0,   1.0,  -26.0,   0.6, 1.0],
-	[-10.0,   2.5,  -16.0,   1.3, 1.0],
-]
-# Cliff face rows as fractions of the cliff height
-const _FACE_ROWS : Array = [0.18, 0.45, 0.72, 0.93]
-# Cap rows (inland distance, m) — follow the exact land height
-const _CAP_ROWS : Array = [0.0, 8.0, 40.0, 110.0, 220.0, 330.0, 440.0]
-
-func _build_ribbon(is_france: bool) -> void:
-	var line : Array = geo.coast_polyline(is_france, RIBBON_STEP)
-	var pts   : PackedVector2Array = line[0]
-	var nrms  : PackedVector2Array = line[1]
-	var count := pts.size()
-	if count < 2:
+func _request_tile(k: Vector3i) -> void:
+	if _jobs.has(k) or _ready_tiles.has(k):
 		return
+	_jobs[k] = WorkerThreadPool.add_task(_tile_job.bind(k), false, "map tile")
 
-	var erosion := FastNoiseLite.new()
-	erosion.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	erosion.seed = 404 if is_france else 202
-	erosion.frequency = 1.0 / 70.0
-	erosion.fractal_octaves = 3
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 77 if is_france else 55
+func _tile_job(k: Vector3i) -> void:
+	var data : Dictionary = builder.tile_data(k)
+	_mutex.lock()
+	_done.append([k, data, false])
+	_mutex.unlock()
 
-	var rows := _SEA_ROWS.size() + _FACE_ROWS.size() + _CAP_ROWS.size()
-	var grid := PackedVector3Array()
-	var shore := PackedFloat32Array()
-	grid.resize(count * rows)
-	shore.resize(count * rows)
+## Turns finished worker data into nodes (main thread) and caches them.
+func _collect(budget_ms: float) -> void:
+	var t0 := Time.get_ticks_usec()
+	while true:
+		_mutex.lock()
+		var item = _done.pop_front() if not _done.is_empty() else null
+		_mutex.unlock()
+		if item == null:
+			break
+		var k : Vector3i = item[0]
+		var jobs : Dictionary = _rib_jobs if item[2] else _jobs
+		if jobs.has(k):
+			WorkerThreadPool.wait_for_task_completion(jobs[k])
+			jobs.erase(k)
+		var node : Node3D = builder.instantiate(item[1])
+		if item[2]:
+			_rib_ready[k] = node
+		else:
+			_ready_tiles[k] = node
+			stats.tiles_built += 1
+		if (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
+			break
 
-	for i in range(count):
-		var p := pts[i]
-		var nv := nrms[i]
-		var s := i * RIBBON_STEP
-		var top : float = geo.land_height(p.x, p.y)
-		var c := smoothstep(14.0, 40.0, top)       # 1 = cliff, 0 = beach
-		# Chunky erosion: buttresses and gullies read as big low-poly facets
-		var e := erosion.get_noise_1d(s) * 7.0 + rng.randf_range(-2.0, 2.0)
-		var r := 0
-		for row in _SEA_ROWS:
-			var d : float = lerpf(row[2], row[0], c)
-			var h : float = lerpf(row[3], row[1], c)
-			grid[i * rows + r] = Vector3(p.x + nv.x * d, h, p.y + nv.y * d)
-			shore[i * rows + r] = row[4]
-			r += 1
-		var foot_d : float = lerpf(-16.0, -10.0, c)
-		var foot_h : float = lerpf(1.3, 2.5, c)
-		for f in _FACE_ROWS:
-			var fd : float = lerpf(foot_d + (-1.0 - foot_d) * f, -10.0 + 9.0 * pow(f, 1.6), c)
-			fd += e * sin(PI * f) * c
-			var h : float = foot_h + (top - foot_h) * f
-			grid[i * rows + r] = Vector3(p.x + nv.x * fd, h, p.y + nv.y * fd)
-			shore[i * rows + r] = (1.0 - f) * (1.0 - c)
-			r += 1
-		for cd in _CAP_ROWS:
-			var q : Vector2 = p + nv * cd
-			var lift : float = 0.4 * (1.0 - cd / _CAP_ROWS[-1])
-			var h : float = top if cd == 0.0 else geo.land_height(q.x, q.y)
-			grid[i * rows + r] = Vector3(q.x, h + lift, q.y)
-			shore[i * rows + r] = 0.0
-			r += 1
-
-	# Split into pieces for culling; neighbouring pieces share an edge sample
-	var all_rows : Array = range(rows)
-	var far_rows : Array = [0, 2, 4, _SEA_ROWS.size() + 1, _SEA_ROWS.size() + 3]
-	for k in range(_CAP_ROWS.size()):
-		if k % 2 == 0:
-			far_rows.append(_SEA_ROWS.size() + _FACE_ROWS.size() + k)
-	var start := 0
-	var piece := 0
-	while start < count - 1:
-		var end := mini(start + RIBBON_PIECE, count - 1)
-		_ribbon_piece(grid, shore, rows, start, end, 1, all_rows, is_france, piece, 0)
-		_ribbon_piece(grid, shore, rows, start, end, LOD_STEP, far_rows, is_france, piece, 1)
-		start = end
-		piece += 1
-
-	_ribbon_collision(grid, rows, count, is_france)
-
-func _ribbon_piece(grid: PackedVector3Array, shore: PackedFloat32Array, rows: int,
-		start: int, end: int, step: int, use_rows: Array, is_france: bool, piece: int, lod: int) -> void:
-	var samples := PackedInt32Array()
-	var i := start
-	while i < end:
-		samples.append(i)
-		i += step
-	samples.append(end)
-	var w := samples.size()
-	var h := use_rows.size()
-	var verts := PackedVector3Array()
-	var cols  := PackedColorArray()
-	verts.resize(w * h)
-	cols.resize(w * h)
-	for k in range(w):
-		for r in range(h):
-			var src : int = samples[k] * rows + use_rows[r]
-			# Row-major (row, sample) so the grid helper winds correctly
-			verts[r * w + k] = grid[src]
-			cols[r * w + k] = Color(shore[src], 0, 0, 1)
-	var idxs := _grid_indices(w, h)
-	if is_france:
-		for t in range(0, idxs.size(), 3):
-			var tmp := idxs[t + 1]
-			idxs[t + 1] = idxs[t + 2]
-			idxs[t + 2] = tmp
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = verts
-	arrays[Mesh.ARRAY_COLOR]  = cols
-	arrays[Mesh.ARRAY_INDEX]  = idxs
-	_mesh_instance(arrays, "%s_Cliffs_%d_lod%d" % ["France" if is_france else "England", piece, lod], lod)
-
-## Low-resolution trimesh of the ribbon so planes collide with the cliffs and
-## cliff tops (the height grid underneath is lower there).
-func _ribbon_collision(grid: PackedVector3Array, rows: int, count: int, is_france: bool) -> void:
-	var sel_rows : Array = [2, 4, _SEA_ROWS.size() + 1, _SEA_ROWS.size() + 3]
-	for k in range(_CAP_ROWS.size()):
-		sel_rows.append(_SEA_ROWS.size() + _FACE_ROWS.size() + k)
-	var step := 2
-	var faces := PackedVector3Array()
-	var i := 0
-	while i < count - 1:
-		var i2 := mini(i + step, count - 1)
-		for r in range(sel_rows.size() - 1):
-			var a := grid[i * rows + sel_rows[r]]
-			var b := grid[i2 * rows + sel_rows[r]]
-			var c := grid[i * rows + sel_rows[r + 1]]
-			var d := grid[i2 * rows + sel_rows[r + 1]]
-			faces.append_array([a, b, c, b, d, c])
-		i = i2
-	var shape := ConcavePolygonShape3D.new()
-	shape.backface_collision = true
-	shape.set_faces(faces)
-	var col := CollisionShape3D.new()
-	col.shape = shape
-	var body := StaticBody3D.new()
-	body.name = "%sCliffCollision" % ("France" if is_france else "England")
-	body.add_child(col)
-	add_child(body)
+func _evict(focus: Vector3, wanted: Dictionary) -> void:
+	if _ready_tiles.size() <= CACHE_MAX:
+		return
+	var spare : Array = []
+	for k in _ready_tiles:
+		if not _shown.has(k) and not wanted.has(k):
+			spare.append(k)
+	spare.sort_custom(func(a, b): return _tile_distance(a, focus) > _tile_distance(b, focus))
+	for i in range(mini(spare.size(), _ready_tiles.size() - CACHE_MAX)):
+		(_ready_tiles[spare[i]] as Node3D).queue_free()
+		_ready_tiles.erase(spare[i])
 
 # ---------------------------------------------------------------------------
-# Sea
+# Cliff ribbons
+# ---------------------------------------------------------------------------
+
+func _build_coasts() -> void:
+	for is_france in [false, true]:
+		var line : Array = geo.coast_polyline(is_france, TileBuilder.RIBBON_STEP)
+		var pts : PackedVector2Array = line[0]
+		if pts.size() < 2:
+			continue
+		var ci := _coasts.size()
+		_coasts.append([pts, line[1], is_france])
+		var start := 0
+		while start < pts.size() - 1:
+			var end := mini(start + TileBuilder.RIBBON_PIECE, pts.size() - 1)
+			var centre := (pts[start] + pts[end]) * 0.5
+			var radius := pts[start].distance_to(pts[end]) * 0.5 + 500.0
+			_pieces.append([ci, start, end, centre, radius])
+			start = end
+
+func _wanted_ribbons(focus: Vector3) -> Dictionary:
+	var wanted := {}
+	var f2 := Vector2(focus.x, focus.z)
+	var dy := maxf(focus.y - 100.0, 0.0)
+	for i in range(_pieces.size()):
+		var p : Array = _pieces[i]
+		var d := maxf(f2.distance_to(p[3]) - p[4], 0.0)
+		d = sqrt(d * d + dy * dy)
+		if d < RIB_FINE:
+			wanted[Vector3i(i, 0, 0)] = true
+		elif d < RIB_FAR:
+			wanted[Vector3i(i, 1, 0)] = true
+	return wanted
+
+func _request_ribbon(k: Vector3i) -> void:
+	if _rib_jobs.has(k) or _rib_ready.has(k):
+		return
+	_rib_jobs[k] = WorkerThreadPool.add_task(_ribbon_job.bind(k), false, "cliff piece")
+
+func _ribbon_job(k: Vector3i) -> void:
+	var p : Array = _pieces[k.x]
+	var c : Array = _coasts[p[0]]
+	var data : Dictionary = builder.ribbon_data(c[0], c[1], p[1], p[2], c[2], k.y)
+	_mutex.lock()
+	_done.append([k, data, true])
+	_mutex.unlock()
+
+func _apply_ribbons(focus: Vector3) -> void:
+	var wanted := _wanted_ribbons(focus)
+	var show := {}
+	var missing : Array = []
+	for k in wanted:
+		if _rib_ready.has(k):
+			show[k] = true
+		else:
+			missing.append(k)
+			var other := Vector3i(k.x, 1 - k.y, 0)    # keep the other LOD until ready
+			if _rib_shown.has(other):
+				show[other] = true
+	for k in _rib_shown.keys():
+		if not show.has(k):
+			var n : Node3D = _rib_ready[k]
+			if n.get_parent() == self:
+				remove_child(n)
+			_rib_shown.erase(k)
+	for k in show:
+		if not _rib_shown.has(k):
+			var n : Node3D = _rib_ready[k]
+			_place(n)
+			add_child(n)
+			_rib_shown[k] = true
+	var f2 := Vector2(focus.x, focus.z)
+	missing.sort_custom(func(a, b): return f2.distance_to(_pieces[a.x][3]) < f2.distance_to(_pieces[b.x][3]))
+	for k in missing:
+		if _rib_jobs.size() >= MAX_JOBS:
+			break
+		_request_ribbon(k)
+	# Drop far-away cached pieces
+	if _rib_ready.size() > 500:
+		for k in _rib_ready.keys():
+			if not show.has(k) and not wanted.has(k):
+				(_rib_ready[k] as Node3D).queue_free()
+				_rib_ready.erase(k)
+
+# ---------------------------------------------------------------------------
+# Sea — a large plane that follows the camera; the shader works in world
+# space so its waves stay put as it moves.
 # ---------------------------------------------------------------------------
 
 func _build_sea() -> void:
-	var mi := MeshInstance3D.new()
-	mi.name = "Sea"
+	_sea = MeshInstance3D.new()
+	_sea.name = "Sea"
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(OUTER_HALF * 2.5, OUTER_HALF * 2.5)
-	mi.mesh = plane
-	mi.position = Vector3(0, SEA_LEVEL, 0)
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	plane.size = Vector2(SEA_SIZE, SEA_SIZE)
+	_sea.mesh = plane
+	_sea.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var mat := ShaderMaterial.new()
 	mat.shader = SEA_SHADER
 	mat.render_priority = -10     # draw before clouds and smoke
-	mi.material_override = mat
-	add_child(mi)
+	_sea.material_override = mat
+	add_child(_sea)
 
 	# Collision: top face at the water surface so planes crash on ditching
-	var body := StaticBody3D.new()
-	body.name = "SeaCollision"
+	_sea_body = StaticBody3D.new()
+	_sea_body.name = "SeaCollision"
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(OUTER_HALF * 2.4, 4.0, OUTER_HALF * 2.4)
+	box.size = Vector3(60000.0, 4.0, 60000.0)
 	col.shape = box
-	body.add_child(col)
-	body.position = Vector3(0, SEA_LEVEL - 2.0, 0)
-	add_child(body)
+	_sea_body.add_child(col)
+	add_child(_sea_body)
+	_follow_sea(initial_focus)
+
+func _follow_sea(focus: Vector3) -> void:
+	var p := WorldOrigin.to_scene(Vector3(snappedf(focus.x, 1000.0), 0.0, snappedf(focus.z, 1000.0)))
+	_sea.position = Vector3(p.x, SEA_LEVEL, p.z)
+	_sea_body.position = Vector3(p.x, SEA_LEVEL - 2.0, p.z)

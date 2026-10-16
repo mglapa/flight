@@ -8,7 +8,9 @@ extends Node3D
 ##
 ## Set `blobs`, colours and options before add_child().
 
-## Each blob: [centre (world), radii (Vector3)]
+## Each blob: [centre, radii (Vector3)].  Given in world (scene) coordinates
+## before add_child; converted to local coordinates in _ready so the cloud can
+## be moved freely (floating origin, wrapping around the camera).
 var blobs : Array = []
 var flat_base := -INF                 ## clamp vertices below this height
 var base_color := Color(0.72, 0.76, 0.82)
@@ -26,6 +28,12 @@ func _ready() -> void:
 	add_to_group("clouds")
 	_compute_bounds()
 	_build()
+	# From here on blobs and bounds are relative to this node
+	var o := position
+	for b in blobs:
+		b[0] = (b[0] as Vector3) - o
+	flat_base -= o.y
+	_bound_centre -= o
 
 func _compute_bounds() -> void:
 	var lo := Vector3(INF, INF, INF)
@@ -40,6 +48,7 @@ func _compute_bounds() -> void:
 
 ## How deeply world_pos sits inside this cloud (0 = outside, 1 = centre).
 func depth_at(world_pos: Vector3) -> float:
+	world_pos -= global_position
 	if world_pos.distance_squared_to(_bound_centre) > _bound_radius * _bound_radius:
 		return 0.0
 	var best := 0.0

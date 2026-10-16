@@ -12,6 +12,7 @@ var _chaser      : Node3D = null
 var _chase_clock : float  = 0.0
 
 func _ready() -> void:
+	add_to_group("origin_container")    # enemies, smoke and effects live here
 	map = Node3D.new()
 	map.name = "DoverMap"
 	map.set_script(DoverMap)
@@ -66,11 +67,11 @@ func _process(delta: float) -> void:
 	if closest != null:
 		closest.chase_target = player
 
-## Ground height at a world (x, z) position (sea level over water).
-func sample_height(wx: float, wz: float) -> float:
+## Ground height below a scene-space (x, z) position (sea level over water).
+func sample_height(x: float, z: float) -> float:
 	if map == null:
 		return 0.0
-	return map.surface_height(wx, wz)
+	return map.surface_height(WorldOrigin.world_x(x), WorldOrigin.world_z(z))
 
 func _spawn_enemies() -> void:
 	var enemy_script  := load("res://scenes/enemies/enemy.gd")

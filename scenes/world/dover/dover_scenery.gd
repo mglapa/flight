@@ -14,17 +14,17 @@ const HOUSE_RANGE  := 12000.0
 
 var _vc_mat : StandardMaterial3D
 var _convoy : Node3D
+var _convoy_x := -6000.0          # world x of the convoy
 var _balloons : Array = []
 var _clock := 0.0
 
 func _ready() -> void:
+	add_to_group("origin_container")
 	_vc_mat = StandardMaterial3D.new()
 	_vc_mat.vertex_color_use_as_albedo = true
 	_vc_mat.vertex_color_is_srgb = true
 	_vc_mat.roughness = 0.85
 
-	_build_trees()
-	_build_houses()
 	_build_airfield()
 	_build_harbour()
 	_build_castle()
@@ -36,9 +36,10 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_clock += delta
 	if is_instance_valid(_convoy):
-		_convoy.position.x += 5.0 * delta     # ~10 knots westward down-Channel
-		if _convoy.position.x > 40000.0:
-			_convoy.position.x = -40000.0
+		_convoy_x += 5.0 * delta              # ~10 knots westward down-Channel
+		if _convoy_x > 40000.0:
+			_convoy_x = -40000.0
+		_convoy.position.x = _convoy_x - WorldOrigin.origin_x
 	for b in _balloons:
 		var node : Node3D = b[0]
 		var phase : float = b[1]
@@ -122,10 +123,10 @@ func _ground(x: float, z: float) -> float:
 	return map.surface_height(x, z)
 
 # ---------------------------------------------------------------------------
-# Trees
+# Tree and house meshes (instanced by tile_builder.gd)
 # ---------------------------------------------------------------------------
 
-func _tree_mesh() -> Mesh:
+static func _tree_mesh() -> Mesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var trunk := Color(0.36, 0.27, 0.18)
@@ -154,86 +155,7 @@ func _tree_mesh() -> Mesh:
 			Vector3(cos(a0) * 2.6, 2.6, sin(a0) * 2.6), Color(0.6, 0.6, 0.6), Vector3(0, 5.0, 0))
 	return st.commit()
 
-func _build_trees() -> void:
-	var mesh := _tree_mesh()
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.vertex_color_is_srgb = true
-	mat.roughness = 0.95
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 8
-
-	var tiles := {}
-	var texel : float = 2.0 * map.geo.CORE_HALF / map.LANDUSE_SIZE
-	var cz := TREE_REGION.position.y
-	while cz < TREE_REGION.end.y:
-		var cx := TREE_REGION.position.x
-		while cx < TREE_REGION.end.x:
-			var lu_c : Color = map.landuse(cx + texel * 0.5, cz + texel * 0.5)
-			var wooded := lu_c.r > 0.3 and lu_c.g < 0.2
-			var spots : Array = []
-			if wooded:
-				var z := cz
-				while z < cz + texel:
-					var x := cx
-					while x < cx + texel:
-						spots.append(Vector2(x, z))
-						x += TREE_STEP
-					z += TREE_STEP
-			elif lu_c.g < 0.1 and lu_c.b < 0.4 and rng.randf() < 0.18:
-				# A lone field tree
-				spots.append(Vector2(cx + rng.randf() * texel, cz + rng.randf() * texel))
-			cx += texel
-			for sp in spots:
-				var px : float = sp.x + rng.randf_range(-0.45, 0.45) * TREE_STEP
-				var pz : float = sp.y + rng.randf_range(-0.45, 0.45) * TREE_STEP
-				if wooded:
-					var lu : Color = map.landuse(px, pz)
-					if smoothstep(0.42, 0.65, lu.r) < rng.randf() or lu.g > 0.2 or lu.b > 0.5:
-						continue
-				var h : float = map.geo.land_height(px, pz)
-				if h < 3.0 or maxf(map.geo.england_d(px, pz), map.geo.france_d(px, pz)) < 120.0:
-					continue
-				if Vector2(px, pz).distance_to(map.geo.airfield_pos) < map.geo.AIRFIELD_R:
-					continue
-				var key := Vector2i(int(floor(px / TILE)), int(floor(pz / TILE)))
-				if not tiles.has(key):
-					tiles[key] = PackedFloat32Array()
-				var s := rng.randf_range(0.8, 1.5)
-				var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.85, 1.25), s))
-				var g := rng.randf_range(0.0, 1.0)
-				var col := Color(0.13 + g * 0.08, 0.26 + g * 0.12, 0.08 + g * 0.04)
-				tiles[key].append_array([b.x.x, b.y.x, b.z.x, px,
-					b.x.y, b.y.y, b.z.y, h - 0.3,
-					b.x.z, b.y.z, b.z.z, pz,
-					col.r, col.g, col.b, 1.0])
-		cz += texel
-
-	for key in tiles:
-		_multimesh(mesh, mat, tiles[key], TREE_RANGE, "Trees_%d_%d" % [key.x, key.y])
-
-func _multimesh(mesh: Mesh, mat: Material, buf: PackedFloat32Array, range_end: float, name_: String) -> void:
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	mm.mesh = mesh
-	mm.instance_count = buf.size() / 16
-	mm.buffer = buf
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = name_
-	mmi.multimesh = mm
-	mmi.material_override = mat
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mmi.visibility_range_end = range_end
-	mmi.visibility_range_end_margin = range_end * 0.1
-	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(mmi)
-
-# ---------------------------------------------------------------------------
-# Towns
-# ---------------------------------------------------------------------------
-
-func _house_mesh() -> Mesh:
+static func _house_mesh() -> Mesh:
 	# Unit house: 1 x 1 x 1 walls with a gabled roof, scaled per instance
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -249,49 +171,6 @@ func _house_mesh() -> Mesh:
 	_tri(st, a, d, r0, wall, inside)
 	_tri(st, c, b, r1, wall, inside)
 	return st.commit()
-
-func _build_houses() -> void:
-	var mesh := _house_mesh()
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 1066
-	# Instance colour tints walls and roof together: brick, render and stone
-	var walls : Array = [Color(1.0, 0.97, 0.90), Color(0.96, 0.90, 0.82), Color(0.92, 0.86, 0.80),
-		Color(0.98, 0.95, 0.92)]
-	var tiles := {}
-	for t in map.geo.towns:
-		var c : Vector2 = t[0]
-		var r : float = t[1] * 1.3
-		var street := rng.randf() * PI
-		var z := c.y - r
-		while z < c.y + r:
-			var x := c.x - r
-			while x < c.x + r:
-				var px := x + rng.randf_range(-4.0, 4.0)
-				var pz := z + rng.randf_range(-4.0, 4.0)
-				x += HOUSE_STEP
-				var dens : float = map.geo.town_density(px, pz)
-				if dens * 1.1 < rng.randf():
-					continue
-				var d := maxf(map.geo.england_d(px, pz), map.geo.france_d(px, pz))
-				if d < 60.0:
-					continue
-				var h : float = map.geo.land_height(px, pz)
-				var w := rng.randf_range(9.0, 14.0)
-				var l := rng.randf_range(12.0, 22.0)
-				var ht := rng.randf_range(6.0, 9.0) * (1.0 + dens * 0.3)
-				var b := Basis(Vector3.UP, street + (PI * 0.5 if rng.randf() < 0.5 else 0.0)) \
-					.scaled(Vector3(w, ht, l))
-				var col : Color = walls[rng.randi() % walls.size()]
-				var key := Vector2i(int(floor(px / TILE)), int(floor(pz / TILE)))
-				if not tiles.has(key):
-					tiles[key] = PackedFloat32Array()
-				tiles[key].append_array([b.x.x, b.y.x, b.z.x, px,
-					b.x.y, b.y.y, b.z.y, h - 0.5,
-					b.x.z, b.y.z, b.z.z, pz,
-					col.r, col.g, col.b, 1.0])
-			z += HOUSE_STEP
-	for key in tiles:
-		_multimesh(mesh, _vc_mat, tiles[key], HOUSE_RANGE, "Houses_%d_%d" % [key.x, key.y])
 
 # ---------------------------------------------------------------------------
 # Landmarks

@@ -9,7 +9,8 @@ shader_type spatial;
 render_mode cull_back, diffuse_lambert, specular_disabled;
 
 uniform sampler2D landuse : filter_linear, repeat_disable;   // r woods, g town, b downland
-uniform float core_half = 48000.0;
+uniform vec4 lu_rect = vec4(0.0, 0.0, 6000.0, 48.0);          // world min x, min z, size, texels
+global uniform vec2 world_origin;                             // floating origin (see world_origin.gd)
 uniform vec2  airfield = vec2(0.0);
 uniform float airfield_r = 950.0;
 uniform float field_size = 280.0;
@@ -87,12 +88,12 @@ void fragment() {
 	NORMAL = normalize((VIEW_MATRIX * vec4(fn_w, 0.0)).xyz);
 
 	float h = wpos.y;
-	vec2 xz = wpos.xz;
-	float px = max(length(fwidth(xz)), 0.05);                 // metres per pixel
+	vec2 xz = wpos.xz + world_origin;                          // world position
+	float px = max(length(fwidth(wpos.xz)), 0.05);            // metres per pixel
 
-	vec2 luv = (xz + core_half) / (2.0 * core_half);
+	// Texel centres sit on the tile edges, so neighbouring tiles match
+	vec2 luv = (xz - lu_rect.xy) / lu_rect.z * ((lu_rect.w - 1.0) / lu_rect.w) + 0.5 / lu_rect.w;
 	vec4 lu = texture(landuse, luv);
-	if (luv.x < 0.0 || luv.y < 0.0 || luv.x > 1.0 || luv.y > 1.0) lu = vec4(0.0);
 	vec2 warp = vec2(vnoise(xz / 900.0), vnoise(xz / 900.0 + 31.7)) - 0.5;
 
 	// ── Patchwork fields with hedgerows ──────────────────────────────────────

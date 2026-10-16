@@ -454,6 +454,10 @@ func _spawn_smoke_puff(is_dark: bool, puff_opacity: float = 1.0) -> void:
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+## Floating origin moved: keep the orbit centre in the same place on the map
+func on_origin_shift(shift: Vector3) -> void:
+	orbit_center -= shift
+
 func set_cloud_alpha(alpha: float) -> void:
 	if _model:
 		_model.set_cloud_alpha(alpha)

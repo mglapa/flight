@@ -14,10 +14,14 @@ uniform vec3 rim_color     : source_color = vec3(0.62, 0.74, 0.86);
 uniform float facet = 48.0;            // wave panel size (m)
 uniform vec2 wind = vec2(0.6, 0.8);
 
+global uniform vec2 world_origin;     // floating origin (see world_origin.gd)
+
 varying vec3 wpos;
+varying vec2 wxz;                     // true world position, for the wave pattern
 
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	wxz = wpos.xz + world_origin;
 }
 
 float hash12(vec2 p) {
@@ -65,10 +69,10 @@ void fragment() {
 	// take over from each other with distance so the facets reach the horizon.
 	vec2 g = vec2(0.0);
 	float remaining = 1.0;
-	vec2 cell = wpos.xz;
+	vec2 cell = wxz;
 	float scale = facet;
 	for (int i = 0; i < 3; i++) {
-		vec2 c = tri_centre(wpos.xz / scale) * scale;
+		vec2 c = tri_centre(wxz / scale) * scale;
 		vec2 gi = wave_grad(c, scale * 3.3) * 3.5 * sqrt(scale / facet);
 		gi += (vec2(hash12(c), hash12(c + 7.7)) - 0.5) * 0.12;
 		float w = 1.0 - smoothstep(scale * 0.05, scale * 0.3, px);
@@ -96,7 +100,7 @@ void fragment() {
 	col *= 0.98 + 0.04 * hash12(floor(cell / facet));
 
 	// Surf band hugging the shore, broken up per panel and slowly pulsing
-	float pulse = 0.5 + 0.5 * sin(TIME * 0.8 + hash12(floor(wpos.xz / 30.0)) * 6.28);
+	float pulse = 0.5 + 0.5 * sin(TIME * 0.8 + hash12(floor(wxz / 30.0)) * 6.28);
 	float foam = step(thick, 0.8 + pulse * 1.2);
 	col = mix(col, foam_color, foam);
 

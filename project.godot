@@ -22,6 +22,7 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 [autoload]
 
 GameSettings="*res://scenes/game_settings.gd"
+WorldOrigin="*res://scenes/world/world_origin.gd"
 
 [display]
 
@@ -100,3 +101,10 @@ fire_cannon={
 [rendering]
 
 anti_aliasing/quality/msaa_3d=2
+
+[shader_globals]
+
+world_origin={
+"type": "vec2",
+"value": Vector2(0, 0)
+}
