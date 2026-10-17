@@ -101,6 +101,9 @@ var cannon_ammo   : int   = CANNON_AMMO_MAX
 
 var fuel : float = MAX_FUEL
 
+const SERVICE_TIME := 6.0        # s stopped on a friendly airfield to turn the aircraft round
+var _service_timer := 0.0
+
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
 var _model : Node3D = null
 var _profile : Dictionary = {}
@@ -166,6 +169,9 @@ var _cannon_shot_ages : Array[int] = []   # cannon shots (separate synthesis)
 
 func _ready() -> void:
 	add_to_group("player")
+	add_to_group("aircraft")
+	add_to_group("fighters")
+	add_to_group("side_" + GameSettings.side)
 	_apply_profile()
 	aspect_ratio = wing_span * wing_span / wing_area
 	throttle = 0.7
@@ -219,6 +225,28 @@ func _apply_profile() -> void:
 		var box := (shape.shape as BoxShape3D).duplicate() as BoxShape3D
 		box.size = p.hitbox
 		shape.shape = box
+
+func get_velocity() -> Vector3:
+	return velocity
+
+## Puts the aircraft at its start: `at` is world space (for a ground start,
+## `at.y` is the ground height and the wheels are set on it, tail down).
+func spawn(at: Vector3, basis_: Basis, on_ground_: bool) -> void:
+	var b := basis_
+	if on_ground_:
+		var pitch := 0.0
+		if absf(WHEEL_L.z - WHEEL_T.z) > 0.01:
+			pitch = atan((WHEEL_L.y - WHEEL_T.y) / (WHEEL_L.z - WHEEL_T.z))
+		b = basis_ * Basis(Vector3.RIGHT, pitch)
+		at.y -= (b * WHEEL_L).y - 0.02
+		velocity = Vector3.ZERO
+		throttle = 0.0
+		on_ground = true
+	else:
+		velocity = -b.z * float(_profile.get("start_speed", 80.0))
+	global_transform = Transform3D(b, WorldOrigin.to_scene(at))
+	if _model and _model.has_method("set_gear_down"):
+		_model.set_gear_down(on_ground_)
 
 func _load_model() -> void:
 	# Low-poly model built in code; offset so its wheels sit on WHEEL_L / WHEEL_R
@@ -306,7 +334,7 @@ func _push_gun_audio() -> void:
 		_gun_playback.push_frame(Vector2(clampf(sample * 0.3, -1.0, 1.0),
 										 clampf(sample * 0.3, -1.0, 1.0)))
 
-func take_hit(hit_pos: Vector3, damage: int = 1) -> void:
+func take_hit(hit_pos: Vector3, damage: int = 1, _source: Node = null) -> void:
 	var flash := Node3D.new()
 	flash.set_script(_hit_flash_script)
 	flash.size = float(damage)
@@ -582,6 +610,10 @@ func _physics_process(delta: float) -> void:
 	# ========================
 	# GROUND / GEAR
 	# ========================
+	# The frame the floating origin moves, the physics server still has the
+	# old collision positions: skip ground contact rather than hit stale terrain
+	if WorldOrigin.last_shift_frame == Engine.get_physics_frames():
+		return
 	var wl := global_transform * WHEEL_L
 	var wr := global_transform * WHEEL_R
 	var wt := global_transform * WHEEL_T
@@ -638,9 +670,28 @@ func _physics_process(delta: float) -> void:
 		pitch_rate *= maxf(0.0, 1.0 -  6.0 * delta)
 		yaw_rate   *= maxf(0.0, 1.0 -  8.0 * delta)
 
-		# Wheels constrain sideways sliding
+		# ---- Tail (or nose) wheel steering ----
+		# The rudder pedals turn the wheel while it's on the ground.  Turn rate
+		# follows speed (a ~10 m turning circle), with a little help from prop
+		# wash and brakes at a crawl.  It fades out as the tail lifts and the
+		# rudder takes over aerodynamically.
+		var spd := velocity.length()
+		var wheel_down := pen_t > -0.15
+		var steer_w := (1.0 - smoothstep(25.0, 45.0, spd)) * (1.0 if wheel_down else 0.0)
+		if steer_w > 0.0:
+			var crawl := maxf(spd, throttle * 4.0)
+			var steer := yaw_input * minf(crawl / 10.0, 0.6) * (1.0 - rudd_dmg * 0.5)
+			yaw_rate = lerpf(yaw_rate, steer, minf(1.0, 10.0 * delta) * steer_w)
+
+		# Wheels constrain sideways sliding: the tyres turn the velocity with
+		# the nose rather than scrubbing it away, so a taxiing turn keeps its speed
 		var lat_vel := velocity.dot(right)
+		var hspeed := Vector2(velocity.x, velocity.z).length()
 		velocity -= right * lat_vel * minf(1.0, 15.0 * delta)
+		var hnew := Vector2(velocity.x, velocity.z).length()
+		if hnew > 0.01 and absf(lat_vel) < hspeed * 0.5:
+			velocity.x *= hspeed / hnew
+			velocity.z *= hspeed / hnew
 
 		# Rolling resistance + wheel brakes.
 		# Holding throttle_down on the ground applies brakes (μ up to ~0.5).
@@ -650,6 +701,56 @@ func _physics_process(delta: float) -> void:
 			velocity -= velocity.normalized() * friction_decel
 		else:
 			velocity = Vector3.ZERO
+	_service(delta)
+
+## Ground crew: stopped on a friendly airfield, the aircraft is repaired,
+## refuelled and rearmed after a short turnaround.
+func _service(delta: float) -> void:
+	var stopped := on_ground and velocity.length() < 0.5
+	if not stopped or not _needs_service():
+		if _service_timer > 0.0 and not stopped:
+			_say("Ground crew: servicing abandoned")
+		_service_timer = 0.0
+		return
+	if _service_timer == 0.0:
+		if not _at_friendly_field():
+			return
+		_say("Ground crew: repairing, refuelling and rearming")
+	_service_timer += delta
+	if _service_timer < SERVICE_TIME:
+		return
+	_service_timer = 0.0
+	for c in comp_hp:
+		comp_hp[c] = COMP_MAX
+	_on_fire = false
+	_burn_timer = 0.0
+	_smoke_opacity = 0.0
+	_smoke_interval = 9999.0
+	_smoke_timer = 9999.0
+	fuel = MAX_FUEL
+	gun_ammo = GUN_AMMO_MAX
+	cannon_ammo = CANNON_AMMO_MAX
+	_say("Aircraft serviced - ready for take-off")
+
+func _needs_service() -> bool:
+	if fuel < MAX_FUEL - 1.0 or gun_ammo < GUN_AMMO_MAX or cannon_ammo < CANNON_AMMO_MAX or _on_fire:
+		return true
+	for v in comp_hp.values():
+		if v < COMP_MAX:
+			return true
+	return false
+
+func _at_friendly_field() -> bool:
+	var m := get_tree().get_first_node_in_group("mission")
+	if m == null or m.get("geo") == null:
+		return false
+	var id : int = m.geo.airfield_at(WorldOrigin.world_x(global_position.x), WorldOrigin.world_z(global_position.z))
+	return id >= 0 and m.geo.airfields[id][1] == GameSettings.side
+
+func _say(text: String) -> void:
+	var m := get_tree().get_first_node_in_group("mission")
+	if m and m.has_method("_say"):
+		m._say(text)
 
 ## Spawns one tracer from the next gun in the rotation and advances the index.
 func _fire_next_gun() -> void:
@@ -667,6 +768,7 @@ func _fire_next_gun() -> void:
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
 	bullet.velocity     = velocity + aim_world * BULLET_SPEED
+	bullet.shooter      = self
 	bullet.exclude_rids = [_hitbox_body.get_rid()]
 	get_parent().add_child(bullet)
 	bullet.global_position = muzzle_world
@@ -690,6 +792,7 @@ func _fire_cannon() -> void:
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
 	bullet.damage       = CANNON_DAMAGE
+	bullet.shooter      = self
 	bullet.velocity     = velocity + aim_world * CANNON_SPEED
 	bullet.exclude_rids = [_hitbox_body.get_rid()]
 	get_parent().add_child(bullet)

@@ -12,13 +12,15 @@ extends RefCounted
 ## Read-only after construction, so worker threads may query it freely.
 
 const DATA_DIR := "res://data/europe/"
+const Airfields := preload("res://scenes/world/geo/airfields.gd")
 
 const RAMP_IN    := 220.0      ## land grid dips toward the sea floor inside this
 const RAMP_OUT   := -60.0      ## ...reaching it here (hidden under the cliff ribbon)
 const EXACT_COAST := 1200.0    ## measure exact coast distance within this
 const BUCKET     := 1500.0     ## coastline spatial-hash cell (game metres)
 const VILLAGE_CELL := 5000.0   ## one possible village per cell (real metres)
-const AIRFIELD_R := 950.0
+const AIRFIELD_R := 950.0     ## flattened, tree- and house-free radius (full scale size)
+const AF_CELL    := 4000.0    ## airfield lookup grid
 
 var map_scale := 1.0
 var lat0 := 51.1279
@@ -49,8 +51,10 @@ var rivers : Array = []             ## [PackedVector2Array game points, width] f
 
 var places : Array = []             ## [name, Vector2 game pos, population]
 var map_meta := {}                  ## the baked map image: file, res, east_min, north_max
-var airfield_pos := Vector2.ZERO
+var airfield_pos := Vector2.ZERO   ## Hawkinge (the original home field)
 var airfield_h := 0.0
+var airfields : Array = []         ## [name, side, Vector2 game pos, ground height]
+var _af_cells := {}                ## Vector2i -> PackedInt32Array of airfield ids
 
 var _n_wood := FastNoiseLite.new()
 var _n_det := FastNoiseLite.new()
@@ -80,11 +84,61 @@ func _init(scale := 1.0) -> void:
 	_setup_noise(_n_wood, 53, 1.0 / 2100.0, 3)
 	_setup_noise(_n_det, 71, 1.0 / 260.0, 2)
 
+	_load_airfields()
 	# RAF Hawkinge, the fighter station behind Folkestone
 	airfield_pos = latlon_to_game(51.1135, 1.1530)
 	airfield_h = _land_raw(airfield_pos.x, airfield_pos.y)
 	print("Geography loaded in %d ms (scale %.2f, %d coast segments)" % [
 		Time.get_ticks_msec() - t0, map_scale, _seg_a.size()])
+
+## Every airfield is a flat, open grass field of radius AIRFIELD_R
+func _load_airfields() -> void:
+	for a in Airfields.LIST:
+		var p := latlon_to_game(a[2], a[3])
+		var id := airfields.size()
+		airfields.append([a[0], a[1], p, _land_raw(p.x, p.y)])
+		var lo := Vector2i(floori((p.x - AIRFIELD_R) / AF_CELL), floori((p.y - AIRFIELD_R) / AF_CELL))
+		var hi := Vector2i(floori((p.x + AIRFIELD_R) / AF_CELL), floori((p.y + AIRFIELD_R) / AF_CELL))
+		for cy in range(lo.y, hi.y + 1):
+			for cx in range(lo.x, hi.x + 1):
+				var key := Vector2i(cx, cy)
+				if not _af_cells.has(key):
+					_af_cells[key] = PackedInt32Array()
+				_af_cells[key].append(id)
+
+## Index of the airfield covering (x, z), or -1
+func airfield_at(x: float, z: float) -> int:
+	var key := Vector2i(floori(x / AF_CELL), floori(z / AF_CELL))
+	if not _af_cells.has(key):
+		return -1
+	var p := Vector2(x, z)
+	for id in _af_cells[key]:
+		if p.distance_to(airfields[id][2]) < AIRFIELD_R:
+			return id
+	return -1
+
+## Airfields overlapping a rect (for the terrain shader): [Vector2 pos, ...]
+func airfields_in(rect: Rect2) -> Array:
+	var out : Array = []
+	var r := rect.grow(AIRFIELD_R)
+	for a in airfields:
+		if r.has_point(a[2]):
+			out.append(a[2])
+	return out
+
+## Layout angle of an airfield (hangars along its local +X edge, the
+## take-off line along local Z).  Shared by the scenery and the missions.
+func airfield_yaw(id: int) -> float:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(airfields[id][0])
+	return rng.randf() * TAU
+
+## Airfield index by name, or -1
+func airfield_index(name_: String) -> int:
+	for i in range(airfields.size()):
+		if airfields[i][0] == name_:
+			return i
+	return -1
 
 static func _setup_noise(n: FastNoiseLite, s: int, f: float, oct: int) -> void:
 	n.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -322,9 +376,11 @@ func _land_raw(x: float, z: float) -> float:
 ## Land height (no coastal ramp) — for scenery and the cliff ribbons.
 func land_height(x: float, z: float) -> float:
 	var h := _land_raw(x, z)
-	var ar := Vector2(x, z).distance_to(airfield_pos)
-	if ar < AIRFIELD_R:
-		h = lerpf(h, airfield_h, 1.0 - smoothstep(AIRFIELD_R * 0.55, AIRFIELD_R, ar))
+	var id := airfield_at(x, z)
+	if id >= 0:
+		var a : Array = airfields[id]
+		var ar := Vector2(x, z).distance_to(a[2])
+		h = lerpf(h, a[3], 1.0 - smoothstep(AIRFIELD_R * 0.55, AIRFIELD_R, ar))
 	return h
 
 ## Sea floor depth (negative)
@@ -428,7 +484,7 @@ func landuse_at(x: float, z: float) -> Color:
 	wood *= 1.0 - smoothstep(0.05, 0.25, town)
 	# Open chalk downland along high cliff tops
 	var down := (1.0 - smoothstep(150.0, 550.0, d)) * smoothstep(35.0, 70.0, h)
-	if Vector2(x, z).distance_to(airfield_pos) < AIRFIELD_R:
+	if airfield_at(x, z) >= 0:
 		wood = 0.0
 		town = 0.0
 	return Color(wood, town, down, 1.0)

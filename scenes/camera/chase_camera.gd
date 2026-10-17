@@ -33,7 +33,7 @@ func _ready() -> void:
 		target = get_node(target_path)
 
 func _physics_process(delta: float) -> void:
-	if not target:
+	if not is_instance_valid(target):
 		return
 
 	# ── Right-stick input ────────────────────────────────────────────────────

@@ -23,6 +23,8 @@ const SNAP := 1000.0
 var origin_x := 0.0
 var origin_z := 0.0
 var shift_count := 0
+## Physics frame of the last shift (collision queries are stale during it)
+var last_shift_frame := -1
 
 ## The node the scene is kept centred on (usually the player)
 var focus : Node3D = null
@@ -65,6 +67,7 @@ func _physics_process(_delta: float) -> void:
 	origin_x += shift.x
 	origin_z += shift.z
 	shift_count += 1
+	last_shift_frame = Engine.get_physics_frames()
 	for c in get_tree().get_nodes_in_group("origin_container"):
 		for child in c.get_children():
 			var n := child as Node3D

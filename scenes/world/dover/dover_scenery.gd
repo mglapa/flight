@@ -190,28 +190,51 @@ func _ll_sea(lat: float, lon: float) -> Vector3:
 	return Vector3(p.x, 0.0, p.y)
 
 func _build_airfield() -> void:
-	# RAF fighter station: grass field with a tarmac strip, hangars and a watch office
-	var ap : Vector2 = map.geo.airfield_pos
-	var y : float = map.geo.airfield_h
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	_box(st, Vector3(0, -0.2, 0), Vector3(30, 0.3, 900), Color(0.32, 0.32, 0.34))
-	for i in range(12):
-		_box(st, Vector3(0, 0.0, -400 + i * 72), Vector3(1.0, 0.16, 24), Color(0.92, 0.92, 0.9))
-	var hangar := Color(0.40, 0.42, 0.36)
-	for i in range(3):
-		var hp := Vector3(160, 0, -220 + i * 110)
-		_box(st, hp, Vector3(45, 12, 60), hangar)
-		# curved roof approximated with a low gable
-		_box(st, hp + Vector3(0, 12, 0), Vector3(36, 3, 60), hangar.darkened(0.1))
-	_box(st, Vector3(120, 0, 120), Vector3(14, 8, 10), Color(0.88, 0.86, 0.80))       # watch office
-	_box(st, Vector3(120, 8, 120), Vector3(6, 3, 6), Color(0.3, 0.3, 0.3))
-	for i in range(6):                                                                  # blast pens
-		var pp := Vector3(-140, 0, -300 + i * 120)
-		_box(st, pp + Vector3(0, 0, -14), Vector3(30, 3, 4), Color(0.30, 0.42, 0.20))
-		_box(st, pp + Vector3(-14, 0, 0), Vector3(4, 3, 30), Color(0.30, 0.42, 0.20))
-		_box(st, pp + Vector3(0, 0, 14), Vector3(30, 3, 4), Color(0.30, 0.42, 0.20))
-	_commit(st, "Airfield", Vector3(ap.x, y, ap.y))
+	# Every airfield of 1940: a grass field (flattened and mown in the terrain)
+	# with hangars and dispersal pens round the edge, laid out at a random angle
+	for i in range(map.geo.airfields.size()):
+		var a : Array = map.geo.airfields[i]
+		var basis := Basis(Vector3.UP, map.geo.airfield_yaw(i))
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var ap : Vector2 = a[2]
+		var y0 : float = a[3]
+		var at := func(local: Vector3) -> Vector3:
+			var w : Vector3 = basis * local
+			return Vector3(w.x, _ground(ap.x + w.x, ap.y + w.z) - y0 - 0.3, w.z)
+		if a[1] == "raf":
+			var hangar := Color(0.40, 0.42, 0.36)
+			for k in range(3):
+				var hp : Vector3 = at.call(Vector3(590, 0, -130 + k * 110))
+				_box(st, hp, Vector3(45, 12, 60), hangar, basis)
+				_box(st, hp + Vector3(0, 12, 0), Vector3(36, 3, 60), hangar.darkened(0.12), basis)
+			var wo : Vector3 = at.call(Vector3(520, 0, 190))                      # watch office
+			_box(st, wo, Vector3(14, 8, 10), Color(0.88, 0.86, 0.80), basis)
+			_box(st, wo + Vector3(0, 8, 0), Vector3(6, 3, 6), Color(0.3, 0.3, 0.3), basis)
+			for k in range(6):                                                    # blast pens
+				var pp : Vector3 = at.call(Vector3(-560, 0, -300 + k * 120))
+				var pen := Color(0.30, 0.42, 0.20)
+				_box(st, pp + basis * Vector3(0, 0, -14), Vector3(30, 3, 4), pen, basis)
+				_box(st, pp + basis * Vector3(-14, 0, 0), Vector3(4, 3, 30), pen, basis)
+				_box(st, pp + basis * Vector3(0, 0, 14), Vector3(30, 3, 4), pen, basis)
+		else:
+			# Forward field: camouflaged tent hangars and huts at the edge of the woods
+			var tent := Color(0.30, 0.33, 0.24)
+			for k in range(4):
+				var tp : Vector3 = at.call(Vector3(-580, 0, -160 + k * 105))
+				_box(st, tp, Vector3(26, 6, 22), tent, basis)
+				_box(st, tp + Vector3(0, 6, 0), Vector3(18, 3, 22), tent.darkened(0.15), basis)
+			for k in range(3):
+				var hp : Vector3 = at.call(Vector3(560, 0, -60 + k * 50))
+				_box(st, hp, Vector3(20, 4, 9), Color(0.44, 0.40, 0.32), basis)
+		# Windsock mast and a white landing "T" in the middle of the field
+		var ws : Vector3 = at.call(Vector3(380, 0, -380))
+		_box(st, ws, Vector3(0.4, 9, 0.4), Color(0.85, 0.85, 0.82), basis)
+		_box(st, ws + Vector3(0, 8.2, 0) + basis * Vector3(1.6, 0, 0), Vector3(3.2, 0.8, 0.8), Color(0.95, 0.55, 0.15), basis)
+		_box(st, Vector3(0, 0.05, 0), Vector3(3, 0.12, 24), Color(0.95, 0.95, 0.92), basis)
+		_box(st, basis * Vector3(0, 0.05, -12), Vector3(16, 0.12, 3), Color(0.95, 0.95, 0.92), basis)
+		var mi := _commit(st, "Airfield_%s" % a[0], Vector3(ap.x, y0, ap.y))
+		mi.visibility_range_end = 40000.0
 
 func _build_harbour() -> void:
 	# Dover: Admiralty Pier, Southern Breakwater and Eastern Arm

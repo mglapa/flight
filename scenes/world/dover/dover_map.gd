@@ -63,7 +63,8 @@ func _ready() -> void:
 	add_to_group("origin_container")
 	add_to_group("world_map")          # the HUD map finds the geography here
 	var t0 := Time.get_ticks_msec()
-	geo = GeoData.new(GameSettings.map_scale)
+	if geo == null:                    # world.gd normally hands the geography in
+		geo = GeoData.new(GameSettings.map_scale)
 	builder = TileBuilder.new(geo, TERRAIN_SHADER)
 	builder.root_size = ROOT_SIZE
 	_build_coasts()

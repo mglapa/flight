@@ -5,6 +5,7 @@ extends Node3D
 var velocity     : Vector3   = Vector3.ZERO
 var damage       : int       = 1   # 1 for MG rounds, 3 for cannon shells
 var exclude_rids : Array = []  # set to shooter's hitbox RID to avoid self-damage
+var shooter      : Node      = null  # who fired it (kill credit)
 
 var _impact_script = preload("res://scenes/plane/impact.gd")
 
@@ -44,7 +45,7 @@ func _process(delta: float) -> void:
 		var parent = hit.collider.get_parent()
 		if parent != null and parent.has_method("take_hit"):
 			# Hit an enemy aircraft
-			parent.take_hit(hit.position, damage)
+			parent.take_hit(hit.position, damage, shooter if is_instance_valid(shooter) else null)
 		else:
 			# Hit terrain
 			_spawn_impact(hit.position)

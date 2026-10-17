@@ -8,7 +8,7 @@ extends RefCounted
 
 const TYPES := {
 	"spitfire": {
-		"name": "Supermarine Spitfire Mk I",
+		"name": "Supermarine Spitfire Mk I", "side": "raf",
 		"short": "Spitfire",
 		"desc": "Agile and fast. The RAF's thoroughbred.",
 		"model": "res://scenes/plane/spitfire/spitfire_model.gd",
@@ -25,7 +25,7 @@ const TYPES := {
 		"camera": [20.0, 5.0], "hitbox": Vector3(12.0, 1.5, 10.0),
 	},
 	"hurricane": {
-		"name": "Hawker Hurricane Mk I",
+		"name": "Hawker Hurricane Mk I", "side": "raf",
 		"short": "Hurricane",
 		"desc": "Rugged, steady gun platform. Eight Brownings.",
 		"model": "res://scenes/plane/hurricane/hurricane_model.gd",
@@ -41,8 +41,25 @@ const TYPES := {
 		"fuel": 1100.0, "start_speed": 78.0,
 		"camera": [21.0, 5.5], "hitbox": Vector3(12.5, 1.8, 10.0),
 	},
+	"bf109": {
+		"name": "Messerschmitt Bf 109 E-4", "side": "lw",
+		"short": "Bf 109",
+		"desc": "Fast climber with hard-hitting 20 mm cannon.",
+		"model": "res://scenes/enemies/bf109/bf109_model.gd",
+		"model_offset": Vector3.ZERO,
+		"mass": 2600.0, "wing_area": 16.2, "span": 9.9, "thrust": 12500.0,
+		"cd0": 0.026, "stall_deg": 16.0,
+		"pitch_power": 3.8, "roll_power": 5.5, "yaw_power": 1.5,
+		"wheels": [Vector3(-1.0, -1.6, -0.55), Vector3(1.0, -1.6, -0.55), Vector3(0.0, -0.58, 3.95)],
+		"guns": [Vector3(-0.15, 0.45, -2.6), Vector3(0.15, 0.45, -2.6)],
+		"gun_interval": 0.025, "gun_ammo": 1000, "gun_speed": 790.0, "gun_label": "7.92 MM MG",
+		"cannons": [Vector3(-2.5, -0.3, -0.5), Vector3(2.5, -0.3, -0.5)],
+		"cannon_interval": 60.0 / 1040.0, "cannon_ammo": 120, "cannon_speed": 600.0, "cannon_label": "MG FF 20 MM",
+		"fuel": 1000.0, "start_speed": 80.0,
+		"camera": [18.0, 4.5], "hitbox": Vector3(10.0, 1.5, 9.0),
+	},
 	"f22": {
-		"name": "Lockheed Martin F-22 Raptor",
+		"name": "Lockheed Martin F-22 Raptor", "side": "any",
 		"short": "F-22",
 		"desc": "Mach 2 scenery scout with a bottomless tank.",
 		"model": "res://scenes/plane/f22/f22_model.gd",
@@ -59,4 +76,12 @@ const TYPES := {
 	},
 }
 
-const ORDER := ["spitfire", "hurricane", "f22"]
+const ORDER := ["spitfire", "hurricane", "bf109", "f22"]
+
+## Aircraft a pilot of `side` ("raf" / "lw") may fly
+static func for_side(side: String) -> Array:
+	var out : Array = []
+	for k in ORDER:
+		if TYPES[k].side == side or TYPES[k].side == "any":
+			out.append(k)
+	return out

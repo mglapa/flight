@@ -1,7 +1,7 @@
 extends RefCounted
 ## Airfields of summer 1940 at their real positions: [name, side, lat, lon].
-## Side: "raf" or "lw" (Luftwaffe).  Shown on the map; the active RAF base
-## (Hawkinge) is also modelled on the ground — see dover_scenery.gd.
+## Side: "raf" or "lw" (Luftwaffe).  Shown on the map, and each one is a
+## flat grass field with hangars on the ground (geo_data.gd, dover_scenery.gd).
 
 const LIST : Array = [
 	# RAF Fighter Command — 11 Group and neighbours
@@ -42,4 +42,10 @@ const LIST : Array = [
 	["Cherbourg-Théville", "lw", 49.6500, -1.4800],
 	["Brussels-Evere", "lw", 50.8700, 4.4500],
 	["Schiphol", "lw", 52.3100, 4.7600],
+	# Home defence round Cologne and the Ruhr
+	["Köln-Butzweilerhof", "lw", 50.9830, 6.8970],
+	["Köln-Ostheim", "lw", 50.9300, 7.0450],
+	["Bonn-Hangelar", "lw", 50.7690, 7.1630],
+	["Düsseldorf", "lw", 51.2890, 6.7670],
+	["Essen-Mülheim", "lw", 51.4020, 6.9370],
 ]

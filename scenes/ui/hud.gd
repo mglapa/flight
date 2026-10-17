@@ -8,6 +8,7 @@ extends CanvasLayer
 
 const NAVBALL_SHADER := preload("res://scenes/ui/navball.gdshader")
 const MapView := preload("res://scenes/ui/map_view.gd")
+const MissionMenu := preload("res://scenes/ui/mission_menu.gd")
 
 const REF := Vector2(2560, 1440)
 const PANEL_H := 250.0
@@ -27,9 +28,12 @@ const WARN       := Color(1.0, 0.72, 0.22)
 const BAD        := Color(0.98, 0.32, 0.26)
 const PANEL_COL  := Color(0.04, 0.05, 0.07, 0.74)
 const RADAR_COL  := Color(0.36, 0.95, 0.55)
+const ALLY       := Color(0.40, 0.72, 1.0)
 
 var plane: Node3D
 var camera: Camera3D
+## The mission director (set by main.gd): objective, tally, feed, markers
+var mission: Node = null
 
 ## Set each frame by main.gd — drives the in-cloud whiteout (0 = clear, 1 = dense)
 var cloud_fog : float = 0.0
@@ -46,6 +50,9 @@ var _origin := Vector2.ZERO
 var _sweep := 0.0
 var _blink := 0.0
 var _map : Control
+var _mission_layer : Control
+var _edge_used : Array = []
+var _menu : Control
 
 func _ready() -> void:
 	_font = _make_font(500)
@@ -70,12 +77,22 @@ func _ready() -> void:
 	_front = _layer("Front")
 	_front.draw.connect(_draw_front)
 
+	_mission_layer = _layer("Mission")
+	_mission_layer.draw.connect(_draw_mission)
+
 	_map = Control.new()
 	_map.name = "Map"
 	_map.set_script(MapView)
 	_map.font = _font
 	_map.font_bold = _font_bold
 	add_child(_map)
+
+	_menu = Control.new()
+	_menu.name = "MissionMenu"
+	_menu.set_script(MissionMenu)
+	_menu.font = _font
+	_menu.font_bold = _font_bold
+	add_child(_menu)
 
 func _make_font(weight: int) -> Font:
 	var f := SystemFont.new()
@@ -95,13 +112,18 @@ func _layer(name_: String) -> Control:
 func _process(delta: float) -> void:
 	_sweep = fmod(_sweep + delta * TAU / 2.5, TAU)
 	_blink += delta
-	_map.plane = plane
-	if not is_instance_valid(plane):
-		_ball.visible = false
-		return
+	_map.plane = plane if is_instance_valid(plane) else null
+	_map.mission = mission
+	_menu.mission = mission
 	var vp := get_viewport().get_visible_rect().size
 	_s = minf(vp.x / REF.x, vp.y / REF.y)
 	_origin = Vector2((vp.x - REF.x * _s) * 0.5, vp.y - REF.y * _s)
+	_mission_layer.queue_redraw()
+	if not is_instance_valid(plane):
+		_ball.visible = false
+		_back.queue_redraw()
+		_front.queue_redraw()
+		return
 
 	var b := plane.global_transform.basis
 	_ball_mat.set_shader_parameter("b_right", b.x)
@@ -286,18 +308,22 @@ func _draw_radar(c: Vector2, r: float) -> void:
 	var fwd := -plane.global_transform.basis.z
 	var fwd_h := Vector3(fwd.x, 0, fwd.z).normalized()
 	var right_h := Vector3(-fwd_h.z, 0, fwd_h.x)
-	for e in get_tree().get_nodes_in_group("enemies"):
+	for e in get_tree().get_nodes_in_group("ai"):
 		if not is_instance_valid(e) or e.get("_dead") == true:
 			continue
 		var rel : Vector3 = e.global_position - plane.global_position
 		var blip := Vector2(rel.dot(right_h), -rel.dot(fwd_h)) * (r / RADAR_RANGE)
 		var clipped := blip.length() > r - 6.0 * _s
+		var foe : bool = e.is_in_group("enemies")
+		if clipped and not foe:
+			continue                       # only enemies are shown at the rim
 		if clipped:
 			blip = blip.normalized() * (r - 6.0 * _s)
 		var pos := c + blip
-		var col := BAD if not clipped else Color(BAD, 0.55)
+		var base := BAD if foe else ALLY
+		var col := base if not clipped else Color(base, 0.55)
 		var sz := 4.5 * _s
-		if e.is_in_group("enemy_fighters"):
+		if e.is_in_group("fighters"):
 			_back.draw_colored_polygon(PackedVector2Array([pos + Vector2(0, -sz * 1.2), pos + Vector2(sz, sz * 0.8),
 				pos + Vector2(-sz, sz * 0.8)]), col)
 		else:
@@ -552,3 +578,91 @@ func _draw_gunsight() -> void:
 		var d := Vector2(cos(a), sin(a))
 		_front.draw_line(pos + d * (r - 8 * _s), pos + d * (r + 8 * _s), col, lw)
 	_front.draw_circle(pos, 2.5 * _s, col)
+
+# ---------------------------------------------------------------------------
+# Mission: objective panel, message feed, target / raid markers
+# ---------------------------------------------------------------------------
+
+func _draw_mission() -> void:
+	if mission == null:
+		return
+	var ci := _mission_layer
+	# Objective and tally, top left under the FPS counter
+	var rows : Array = mission.status_lines()
+	var at := Vector2(14.0, 40.0) * _s
+	var w := 400.0 * _s
+	var h := (78.0 + 27.0 * rows.size()) * _s
+	_panel(ci, Rect2(at, Vector2(w, h)))
+	_text(ci, at + Vector2(20, 32) * _s, String(mission.def.name).to_upper(), 17.0, ACCENT, HORIZONTAL_ALIGNMENT_LEFT, true)
+	_text(ci, at + Vector2(20, 58) * _s, mission.objective(), 13.0, TXT)
+	for i in range(rows.size()):
+		var y := at.y + (88.0 + 27.0 * i) * _s
+		_text(ci, Vector2(at.x + 20 * _s, y), rows[i][0], 12.0, TXT_DIM, HORIZONTAL_ALIGNMENT_LEFT, true)
+		_text(ci, Vector2(at.x + w - 20 * _s, y), rows[i][1], 16.0, TXT, HORIZONTAL_ALIGNMENT_RIGHT, true)
+
+	# Recent messages, top centre
+	var vp := get_viewport().get_visible_rect().size
+	var k := 0
+	for i in range(mission.feed.size() - 1, -1, -1):
+		var age : float = mission.time - mission.feed[i][1]
+		if age > 7.0 or k >= 4:
+			break
+		var a := clampf((7.0 - age) / 1.5, 0.0, 1.0)
+		var y := (64.0 + 34.0 * k) * _s
+		var x0 := vp.x * 0.5 - 600.0 * _s
+		_text(ci, Vector2(x0 + 1.5 * _s, y + 1.5 * _s), mission.feed[i][0], 20.0, Color(0, 0, 0, 0.6 * a),
+			HORIZONTAL_ALIGNMENT_CENTER, true, 1200.0 * _s)
+		_text(ci, Vector2(x0, y), mission.feed[i][0], 20.0, Color(TXT, a), HORIZONTAL_ALIGNMENT_CENTER, true,
+			1200.0 * _s)
+		k += 1
+
+	if not is_instance_valid(camera) or not is_instance_valid(plane) or _map.big_open:
+		return
+	_edge_used.clear()
+	for m in mission.markers():
+		var col : Color = ACCENT if m[1] == mission.target_name.to_upper() else (ALLY if m[2] else BAD)
+		_marker(ci, WorldOrigin.to_scene(m[0]), m[1], col)
+
+## Diamond on screen, or an arrow on the screen edge pointing toward it
+func _marker(ci: Control, p: Vector3, label: String, col: Color) -> void:
+	var vp := get_viewport().get_visible_rect().size
+	var rel := p - camera.global_position
+	var dist_km := Vector2(rel.x, rel.z).length() / 1000.0
+	var margin := 70.0 * _s
+	var screen := Rect2(Vector2(margin, margin), vp - Vector2(margin, margin) * 2.0)
+	# Edge arrows stay clear of the mission panel, minimap and instruments
+	var edge := Rect2(Vector2(margin, 260.0 * _s), vp - Vector2(margin * 2.0, 260.0 * _s + 330.0 * _s))
+	var behind := camera.is_position_behind(p)
+	var sp := camera.unproject_position(p) if not behind else Vector2.ZERO
+	var dtext := "%.1f km" % dist_km if dist_km < 10.0 else "%d km" % int(dist_km)
+	if not behind and screen.has_point(sp):
+		var d := 9.0 * _s
+		var pts := PackedVector2Array([sp + Vector2(0, -d), sp + Vector2(d, 0), sp + Vector2(0, d), sp + Vector2(-d, 0), sp + Vector2(0, -d)])
+		ci.draw_polyline(pts, Color(0, 0, 0, 0.6), maxf(2.0, 5.0 * _s))
+		ci.draw_polyline(pts, col, maxf(1.5, 2.5 * _s))
+		_text(ci, sp + Vector2(0, -16 * _s), label, 13.0, col, HORIZONTAL_ALIGNMENT_CENTER, true)
+		_text(ci, sp + Vector2(0, 30 * _s), dtext, 12.0, Color(TXT, 0.8), HORIZONTAL_ALIGNMENT_CENTER, true)
+		return
+	# Off screen: direction in the camera's view plane
+	var local := camera.global_transform.basis.inverse() * rel
+	var dir := Vector2(local.x, -local.y)
+	if dir.length() < 0.001:
+		dir = Vector2.DOWN
+	dir = dir.normalized()
+	var c := edge.get_center()
+	var half := edge.size * 0.5
+	var t := minf(half.x / maxf(absf(dir.x), 0.001), half.y / maxf(absf(dir.y), 0.001))
+	var e := c + dir * t
+	# Don't stack arrows that point the same way: slide along the edge
+	var along := Vector2(-dir.y, dir.x)
+	for u in _edge_used:
+		if (u as Vector2).distance_to(e) < 56.0 * _s:
+			e += along * 60.0 * _s
+	_edge_used.append(e)
+	var side := Vector2(-dir.y, dir.x)
+	var sz := 14.0 * _s
+	ci.draw_colored_polygon(PackedVector2Array([e + dir * sz, e - dir * sz * 0.4 + side * sz * 0.8,
+		e - dir * sz * 0.4 - side * sz * 0.8]), col)
+	var lp := e - dir * 40.0 * _s
+	_text(ci, lp + Vector2(0, -2 * _s), label, 12.0, col, HORIZONTAL_ALIGNMENT_CENTER, true)
+	_text(ci, lp + Vector2(0, 16 * _s), dtext, 11.0, Color(TXT, 0.8), HORIZONTAL_ALIGNMENT_CENTER, true)

@@ -15,8 +15,7 @@ uniform sampler2D water_tex : filter_linear, repeat_disable;  // (edge distance 
 uniform vec4 water_rect = vec4(0.0, 0.0, 6000.0, 64.0);
 uniform bool has_water = false;
 uniform float buildings_shown = 0.0;   // 3D buildings present: hide the painted roofs
-uniform vec2  airfield = vec2(0.0);
-uniform float airfield_r = 950.0;
+uniform vec3  airfields[4];          // xy = world centre, z = radius (unused: far away)
 uniform float field_size = 280.0;
 
 varying vec3 wpos;
@@ -286,8 +285,17 @@ void fragment() {
 	}
 
 	// ── Airfield: mown grass ─────────────────────────────────────────────────
-	float af = 1.0 - smoothstep(airfield_r * 0.55, airfield_r * 0.56, length(xz - airfield));
-	col = mix(col, vec3(0.42, 0.60, 0.27), af);
+	float af = 0.0;
+	float mow = 0.0;
+	for (int i = 0; i < 4; i++) {
+		vec2 d = xz - airfields[i].xy;
+		float a = 1.0 - smoothstep(airfields[i].z * 0.55, airfields[i].z * 0.56, length(d));
+		if (a > af) {
+			af = a;
+			mow = step(0.5, fract(d.x / 60.0));       // mown stripes
+		}
+	}
+	col = mix(col, vec3(0.42, 0.60, 0.27) * (0.96 + 0.06 * mow), af);
 
 	// ── Shingle beaches ──────────────────────────────────────────────────────
 	if (shore > 0.1) {

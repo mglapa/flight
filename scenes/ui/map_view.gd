@@ -26,8 +26,10 @@ const ENEMY := Color(1.0, 0.30, 0.25)
 const ALLY := Color(0.40, 0.72, 1.0)
 const SHIP := Color(0.85, 0.87, 0.88)
 const PLAYER := Color(1.0, 0.82, 0.25)
+const TARGET := Color(1.0, 0.62, 0.15)
 
 var plane : Node3D
+var mission : Node = null
 var font : Font
 var font_bold : Font
 
@@ -112,6 +114,7 @@ func _input(event: InputEvent) -> void:
 			_zoom(1.25)
 		elif k == KEY_ESCAPE:
 			big_open = false
+			get_viewport().set_input_as_handled()
 	elif big_open and event is InputEventJoypadButton and event.pressed:
 		var b := (event as InputEventJoypadButton).button_index
 		if b == JOY_BUTTON_RIGHT_SHOULDER:
@@ -292,6 +295,16 @@ func _draw_layer(wc: Vector2, wh: Vector2, half_m: float, centre_px: Vector2, in
 			var q := 4.0 * _s
 			_overlay.draw_colored_polygon(PackedVector2Array([p + Vector2(0, -q), p + Vector2(q, 0),
 				p + Vector2(0, q), p + Vector2(-q, 0)]), SHIP)
+	if mission != null and mission.target != Vector2.INF:
+		var tp := _to_screen(mission.target, wc, wh, half_m, centre_px)
+		if inside.call(tp):
+			var rr := maxf(mission.target_radius / half_m * wh.y, 7.0 * _s)
+			_overlay.draw_arc(tp, rr, 0.0, TAU, 32, Color(0, 0, 0, 0.6), maxf(2.0, 5.0 * _s))
+			_overlay.draw_arc(tp, rr, 0.0, TAU, 32, TARGET, maxf(1.5, 2.5 * _s))
+			_overlay.draw_line(tp - Vector2(rr + 6 * _s, 0), tp + Vector2(rr + 6 * _s, 0), TARGET, maxf(1.0, 1.5 * _s))
+			_overlay.draw_line(tp - Vector2(0, rr + 6 * _s), tp + Vector2(0, rr + 6 * _s), TARGET, maxf(1.0, 1.5 * _s))
+			if big:
+				_text(tp + Vector2(0, -rr - 12 * _s), mission.target_name.to_upper(), 14.0, TARGET, true)
 	for group in [["allies", ALLY], ["enemies", ENEMY]]:
 		for e in get_tree().get_nodes_in_group(group[0]):
 			if not is_instance_valid(e) or e.get("_dead") == true:
@@ -299,7 +312,7 @@ func _draw_layer(wc: Vector2, wh: Vector2, half_m: float, centre_px: Vector2, in
 			var w := WorldOrigin.to_world((e as Node3D).global_position)
 			var p := _to_screen(Vector2(w.x, w.z), wc, wh, half_m, centre_px)
 			if inside.call(p):
-				var size := (7.0 if e.is_in_group("enemy_fighters") else 9.0) * _s
+				var size := (7.0 if e.is_in_group("fighters") else 9.0) * _s
 				_arrow(p, _screen_dir(e), size, group[1])
 	# The player, always on top
 	_arrow(wc, _screen_dir(plane), 11.0 * _s, PLAYER)

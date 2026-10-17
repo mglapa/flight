@@ -32,6 +32,12 @@ var map_scale := 1.0
 ## Playable aircraft key in scenes/plane/aircraft_types.gd
 var aircraft := "spitfire"
 
+## Mission id (scenes/mission/missions.gd), the player's side ("raf" / "lw")
+## and the airfield to start from (by name; "" = the mission's default)
+var mission := "london"
+var side := "raf"
+var airfield := ""
+
 ## The weather actually used for this sortie (RANDOM resolved to a real type).
 func resolved_weather() -> int:
 	if weather != Weather.RANDOM:

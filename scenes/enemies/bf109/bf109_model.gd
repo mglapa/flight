@@ -9,6 +9,8 @@ extends "res://scenes/plane/lowpoly_aircraft.gd"
 ##
 ## Model space: nose toward -Z, up +Y, right wing +X, origin near the wing
 ## quarter chord.  Shared helpers live in lowpoly_aircraft.gd.
+## Wheel contact points: mains (±1.0, -1.6, -0.55), fixed tail wheel
+## (0, -0.58, 3.95) — the same as the "bf109" entry in aircraft_types.gd.
 
 const RLM71 := Color(0.29, 0.32, 0.22)     # dark green
 const RLM02 := Color(0.48, 0.48, 0.39)     # grey-green
@@ -62,6 +64,7 @@ func _ready() -> void:
 
 	_build_canopy()
 	_build_control_surfaces(mat)
+	_build_gear(mat)
 	# Spinner: black-green with one white segment
 	_build_prop(mat, Vector3(0, 0.02, -3.75), 1.55, 3, 0.36, 0.62,
 		func(a: float) -> Color: return WHITE if fposmod(a, TAU) < TAU / 3.0 else RLM70,
@@ -260,6 +263,12 @@ func _build_canopy() -> void:
 	_add_mesh(self, sf, _vc_material(), "Frames")
 
 func _build_details() -> void:
+	# Fixed tail wheel (part of the airframe mesh)
+	var t_top := Vector3(0, 0.02, 3.82)
+	var t_wheel := Vector3(0, -0.43, 3.95)
+	_strut(_st, t_top, t_wheel + Vector3(0, 0.06, 0), 0.07, 0.07, RLM65)
+	_cylinder(_st, t_wheel - Vector3(0.035, 0, 0), Vector3.RIGHT, 0.15, 0.15, 0.07, 8, BLACK, METAL)
+
 	# Exhaust stacks low on the inverted-V DB 601
 	for side in [1.0, -1.0]:
 		for i in range(6):
@@ -299,6 +308,27 @@ func _build_details() -> void:
 	for side in [1.0, -1.0]:
 		var gp := _wing_pt(side, 2.5, 0.0, 0.0)
 		_cylinder(_st, gp + Vector3(0, -0.02, 0.05), Vector3.FORWARD, 0.04, 0.04, 0.32, 6, BLACK)
+
+## Narrow-track main gear hinged at the fuselage, splayed outward and folding
+## out into the wings.  (The small fixed tail wheel is in _build_details.)
+func _build_gear(mat: Material) -> void:
+	for side in [1.0, -1.0]:
+		var top := Vector3(side * 0.42, _wing_y(0.42) - 0.08, -0.38)
+		var wheel := Vector3(side * 1.0, -1.27, -0.55)
+		var st := _begin()
+		_strut(st, top, wheel + Vector3(-side * 0.08, 0.06, 0), 0.1, 0.1, RLM65)
+		var along := (wheel - top).normalized()
+		var door_n : Vector3 = along.cross(Vector3.BACK).normalized() * side
+		_strut(st, top + door_n * 0.07 + along * 0.08, wheel + door_n * 0.07 - along * 0.3, 0.34, 0.03, RLM65)
+		_cylinder(st, wheel - Vector3(side * 0.075, 0, 0), Vector3(side, 0, 0), 0.33, 0.33, 0.15, 10, BLACK, METAL)
+		var pivot := Node3D.new()
+		pivot.name = "MainGear_%s" % ("R" if side > 0.0 else "L")
+		pivot.position = top
+		add_child(pivot)
+		var mi := _add_mesh(pivot, st, mat, "Leg")
+		mi.position = -top
+		_gear_pivots.append([pivot, pivot.transform, side * deg_to_rad(60.0), Vector3.BACK])
+
 
 # ---------------------------------------------------------------------------
 # Markings

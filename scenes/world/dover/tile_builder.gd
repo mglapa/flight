@@ -174,8 +174,13 @@ func _material(lu: Image, lu_rect: Vector4, water: Image = null, water_rect := V
 		m.set_shader_parameter("water_tex", ImageTexture.create_from_image(water))
 		m.set_shader_parameter("water_rect", water_rect)
 		m.set_shader_parameter("has_water", true)
-	m.set_shader_parameter("airfield", geo.airfield_pos)
-	m.set_shader_parameter("airfield_r", geo.AIRFIELD_R)
+	var fields : Array = geo.airfields_in(Rect2(lu_rect.x, lu_rect.y, lu_rect.z, lu_rect.z))
+	var packed := PackedVector3Array()
+	for i in range(mini(fields.size(), 4)):
+		packed.append(Vector3(fields[i].x, fields[i].y, geo.AIRFIELD_R))
+	while packed.size() < 4:
+		packed.append(Vector3(1e9, 1e9, 0.0))
+	m.set_shader_parameter("airfields", packed)
 	return m
 
 ## Signed distance to river banks and lake shores, (e + 64) as bytes; null
@@ -394,7 +399,7 @@ func _tree_buffer(key: Vector3i, lu: Image, x0: float, z0: float, size: float) -
 				var h : float = geo.land_height(px, pz)
 				if h < 3.0 or geo.coast_d(px, pz) < 120.0 or geo.water_edge(px, pz) < 12.0:
 					continue
-				if Vector2(px, pz).distance_to(geo.airfield_pos) < geo.AIRFIELD_R:
+				if geo.airfield_at(px, pz) >= 0:
 					continue
 				var s := rng.randf_range(0.8, 1.5)
 				var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.85, 1.25), s))

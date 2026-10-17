@@ -45,6 +45,15 @@ func _finish_build() -> void:
 		_gear_t = 0.0
 		_gear_target = 0.0
 
+## Snap the undercarriage up or down (e.g. for a start on the ground)
+func set_gear_down(down: bool) -> void:
+	if _gear_pivots.is_empty():
+		return
+	_gear_t = 1.0 if down else 0.0
+	_gear_target = _gear_t
+	_gear_clock = 0.5
+	_update_gear(0.0)
+
 ## Fade the whole aircraft (e.g. while it is inside a cloud), 1 = opaque.
 func set_cloud_alpha(alpha: float) -> void:
 	for m in _materials:
