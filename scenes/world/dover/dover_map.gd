@@ -35,6 +35,14 @@ const SEA_SIZE     := 1100000.0
 ## Where to centre the first build (world coords) before the player exists
 var initial_focus := Vector3(0, 4572, 1000)
 
+## The first build runs on worker threads over several frames; `built` fires
+## once the ground around initial_focus is complete.  load_progress() is 0..1.
+signal built
+var is_built := false
+var _init_total := 0
+var _init_done := 0
+var _build_t0 := 0
+
 var geo
 var builder
 
@@ -70,28 +78,35 @@ func _ready() -> void:
 	_build_coasts()
 	_build_sea()
 
-	# First build: everything needed around the spawn point, in parallel
+	# First build: everything needed around the spawn point, in parallel on
+	# the worker threads; _process turns the results into nodes as they come
 	var focus := initial_focus
 	for k in _wanted_tiles(focus):
 		_request_tile(k)
 	for k in _wanted_ribbons(focus):
 		if k.y == 0:              # nearby full-detail cliffs now; distant ones stream in
 			_request_ribbon(k)
-	for id in _jobs.values() + _rib_jobs.values():
-		WorkerThreadPool.wait_for_task_completion(id)
-	_jobs.clear()
-	_rib_jobs.clear()
-	_collect(INF)
-	_apply(focus)
-	_instant = false
+	_init_total = _jobs.size() + _rib_jobs.size()
+	_build_t0 = t0
 
+## Fraction of the first build done (worker results turned into nodes)
+func load_progress() -> float:
+	if is_built:
+		return 1.0
+	return float(_init_done) / float(maxi(_init_total, 1))
+
+func _finish_first_build() -> void:
+	_apply(initial_focus)
+	_instant = false
 	var scenery := Node3D.new()
 	scenery.set_script(DoverScenery)
 	scenery.name = "Scenery"
 	scenery.map = self
 	add_child(scenery)
+	is_built = true
 	print("Dover map ready in %d ms (%d tiles, %d cliff pieces)" % [
-		Time.get_ticks_msec() - t0, _shown.size(), _rib_shown.size()])
+		Time.get_ticks_msec() - _build_t0, _shown.size(), _rib_shown.size()])
+	built.emit()
 
 func _exit_tree() -> void:
 	# Never free the map while workers still reference it
@@ -110,6 +125,12 @@ func _exit_tree() -> void:
 	_mutex.unlock()
 
 func _process(delta: float) -> void:
+	if not is_built:
+		# Spend most of the frame on the first build; the loading screen still animates
+		_init_done += _collect(25.0)
+		if _jobs.is_empty() and _rib_jobs.is_empty() and _done.is_empty():
+			_finish_first_build()
+		return
 	var t0 := Time.get_ticks_usec()
 	var focus := _focus_world()
 	_follow_sea(focus)
@@ -274,8 +295,9 @@ func _tile_job(k: Vector3i) -> void:
 	_mutex.unlock()
 
 ## Turns finished worker data into nodes (main thread) and caches them.
-func _collect(budget_ms: float) -> void:
+func _collect(budget_ms: float) -> int:
 	var t0 := Time.get_ticks_usec()
+	var n := 0
 	while true:
 		_mutex.lock()
 		var item = _done.pop_front() if not _done.is_empty() else null
@@ -293,8 +315,10 @@ func _collect(budget_ms: float) -> void:
 		else:
 			_ready_tiles[k] = node
 			stats.tiles_built += 1
+		n += 1
 		if (Time.get_ticks_usec() - t0) / 1000.0 > budget_ms:
 			break
+	return n
 
 func _evict(focus: Vector3, wanted: Dictionary) -> void:
 	if _ready_tiles.size() <= CACHE_MAX:

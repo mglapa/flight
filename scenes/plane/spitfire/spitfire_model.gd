@@ -310,8 +310,8 @@ func _build_markings() -> void:
 # ---------------------------------------------------------------------------
 
 ## Main wheels sit at model (±1.6, -1.17, -1.1) with 0.33 m tyres, so their
-## contact points are (±1.6, -1.5, -1.1); the tail wheel touches at
-## (0, -1.2, 4.7).  The owner offsets the model to match its gear constants.
+## contact points are (±1.6, -1.5, -1.1); the short tail wheel touches at
+## (0, -0.27, 4.7), giving the real ~12° tail-down sit.  The owner offsets the model to match its gear constants.
 func _build_gear(mat: Material) -> void:
 	for side in [1.0, -1.0]:
 		var top := Vector3(side * 0.95, _wing_y(0.95) - 0.12, -0.75)
@@ -333,8 +333,8 @@ func _build_gear(mat: Material) -> void:
 		_gear_pivots.append([pivot, pivot.transform, side * deg_to_rad(50.0), Vector3.BACK])
 
 	var st_t := _begin()
-	var t_top := Vector3(0, 0.05, 4.45)
-	var t_wheel := Vector3(0, -1.07, 4.7)
+	var t_top := Vector3(0, 0.06, 4.5)
+	var t_wheel := Vector3(0, -0.14, 4.7)
 	_strut(st_t, t_top, t_wheel + Vector3(0, 0.08, 0), 0.07, 0.07, METAL)
 	_cylinder(st_t, t_wheel - Vector3(0.04, 0, 0), Vector3.RIGHT, 0.13, 0.13, 0.08, 8, BLACK, METAL)
 	var tp := Node3D.new()

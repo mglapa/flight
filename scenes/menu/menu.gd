@@ -1,11 +1,11 @@
 extends Node3D
 ## Main menu: a live diorama (the chosen aircraft cruising past the white
-## cliffs) behind the mission cards, side, aircraft, start airfield, weather
-## and map scale choices and the sortie button.
+## cliffs) behind the mission cards, side, aircraft, weather and map scale
+## choices and the sortie button.  The start point is picked on a map once
+## the mission has loaded (scenes/ui/spawn_picker.gd).
 
 const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
 const Missions := preload("res://scenes/mission/missions.gd")
-const Airfields := preload("res://scenes/world/geo/airfields.gd")
 const Cloud := preload("res://scenes/world/weather/cloud.gd")
 const SEA_SHADER := preload("res://scenes/world/dover/sea.gdshader")
 const CLOUD_SHADER := preload("res://scenes/world/weather/cloud.gdshader")
@@ -29,8 +29,6 @@ var _brief : Label
 var _side_row : HBoxContainer
 var _aircraft_row : HBoxContainer
 var _ac_hint : Label
-var _field_pick : OptionButton
-var _start_note : Label
 
 func _ready() -> void:
 	_font = _make_font(500)
@@ -281,12 +279,6 @@ func _build_ui() -> void:
 		_side_row.add_child(_choice(sd[1], sgroup, GameSettings.side == sd[0], func(): _set_side(sd[0])))
 	_aircraft_row = _row(col, "AIRCRAFT")
 	_ac_hint = _label("", 26, TXT_DIM)
-	var start_row := _row(col, "START")
-	_field_pick = _option(640)
-	_field_pick.item_selected.connect(func(i: int): GameSettings.airfield = _field_pick.get_item_metadata(i))
-	start_row.add_child(_field_pick)
-	_start_note = _label("", 28, TXT_DIM)
-	start_row.add_child(_start_note)
 
 	var wrow := _row(col, "WEATHER")
 	var wpick := _option(420)
@@ -324,7 +316,7 @@ func _build_ui() -> void:
 	row.add_child(quit)
 
 	var help := _label("W / S  pitch      A / D  roll      Q / E  rudder      ↑ / ↓  throttle (↓ brakes on the ground)" +
-		"      SPACE  guns      M  map      ESC  pause", 28, TXT_DIM)
+		"      SPACE  guns      Z / X  zoom      hold B  bail out      M  map      ESC  pause", 28, TXT_DIM)
 	help.position = Vector2(200, 2160 - 120)
 	layer.add_child(help)
 
@@ -426,13 +418,11 @@ func _mission_card(m: Dictionary, group: ButtonGroup) -> Button:
 		name_l.add_theme_color_override("font_color", ACCENT if on else TXT)
 		if on:
 			GameSettings.mission = m.id
-			GameSettings.airfield = ""
 			_refresh())
 	return b
 
 func _set_side(sd: String) -> void:
 	GameSettings.side = sd
-	GameSettings.airfield = ""
 	_refresh()
 
 ## Rebuilds everything that depends on the mission and side
@@ -442,7 +432,7 @@ func _refresh() -> void:
 	# Aircraft for this side
 	for c in _aircraft_row.get_children():
 		c.queue_free()
-	var allowed : Array = AircraftTypes.for_side(GameSettings.side)
+	var allowed : Array = AircraftTypes.for_side(GameSettings.side, m.id == "free")
 	if not allowed.has(GameSettings.aircraft):
 		GameSettings.aircraft = allowed[0]
 		_spawn_plane()
@@ -456,26 +446,6 @@ func _refresh() -> void:
 	if _ac_hint.get_parent() == null:
 		_aircraft_row.get_parent().add_child(_ac_hint)
 	_ac_hint.text = AircraftTypes.TYPES[GameSettings.aircraft].desc
-	# Where the player starts
-	_field_pick.clear()
-	var attacks := Missions.player_attacks(m, GameSettings.side)
-	var in_air : bool = attacks or (m.id != "free" and m.player_start == "air")
-	_field_pick.visible = not in_air
-	if in_air:
-		_start_note.text = "In the air, alongside the bombers." if attacks else "In the air, facing the raid."
-		return
-	var fields : Array = Missions.start_fields(m, GameSettings.side, Airfields.LIST, GameSettings.map_scale)
-	var pick := 0
-	for i in range(fields.size()):
-		var f : Array = fields[i]
-		var label : String = f[0] if f[0] == Missions.AIRBORNE or m.id == "free" else "%s  —  %d km" % [f[0], roundi(f[1])]
-		_field_pick.add_item(label)
-		_field_pick.set_item_metadata(i, f[0])
-		if f[0] == GameSettings.airfield:
-			pick = i
-	_field_pick.select(pick)
-	GameSettings.airfield = _field_pick.get_item_metadata(pick)
-	_start_note.text = "km to the target" if m.id != "free" else ""
 
 func _button(text: String, primary: bool) -> Button:
 	var b := Button.new()

@@ -1,8 +1,9 @@
 extends Node
 ## Mission director (group "mission").
 ##
-## setup() reads GameSettings (mission, side, airfield, aircraft) and works
-## out where the player starts; on entering the tree it spawns the raid
+## plan() reads GameSettings (mission, side, aircraft) and lays out the raid;
+## start_options() lists where the player may start (the spawn picker shows
+## them on a map) and choose_start() fixes it.  On entering the tree it spawns the raid
 ## (bombers in vics with their escort), the defending squadrons and the
 ## player's own section.  While flying it hands AI fighters their targets,
 ## promotes a new bomber leader when one is lost, keeps the tally (bombs on
@@ -78,6 +79,8 @@ var finished := false                  ## debrief is ready to show
 var _decided_at := -1.0
 var _lost_at := -1.0
 var _had_player := false
+var player_bailed := false
+var _chute : Node3D = null             ## the player under his parachute
 
 var _wing : Array = []                 ## AI wingmen of the player
 var _fires : Array = []                ## [world Vector3, end time]
@@ -90,7 +93,7 @@ var _smoke : Node = null
 # Setup
 # ---------------------------------------------------------------------------
 
-func setup() -> void:
+func plan() -> void:
 	side = GameSettings.side
 	def = Missions.by_id(GameSettings.mission)
 	attacker = def.attacker
@@ -107,6 +110,40 @@ func setup() -> void:
 		var out1 := target + raid_dir.rotated(0.75) * 12000.0
 		var home := target + raid_dir.rotated(0.35) * (float(def.approach) + 15000.0)
 		_route = [Vector3(target.x, alt, target.y), Vector3(out1.x, alt, out1.y), Vector3(home.x, alt + 300.0, home.y)]
+
+## Where the player may start: [{name, pos (game Vector2), air, km}].
+## Escorts start with the bombers, a defender scrambles from one of the
+## fields nearest the target (or is already up, if the mission says so), and
+## Free Flight offers every field of the side plus a start over Dover.
+func start_options() -> Array:
+	var out : Array = []
+	if Missions.player_attacks(def, side):
+		out.append({"name": "With the bombers", "pos": _raid_start, "air": true, "km": -1.0})
+		return out
+	if def.id != "free" and def.player_start == "air":
+		out.append({"name": "Airborne, facing the raid", "pos": _raid_start - raid_dir * 5500.0, "air": true, "km": -1.0})
+		return out
+	var ref : Vector2 = target if target != Vector2.INF else geo.airfield_pos
+	var fields : Array = []
+	for i in range(geo.airfields.size()):
+		var a : Array = geo.airfields[i]
+		if a[1] == side:
+			fields.append({"name": a[0], "pos": a[2], "air": false, "km": (a[2] as Vector2).distance_to(ref) / 1000.0})
+	fields.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return x.km < y.km)
+	if def.id == "free":
+		out.append({"name": Missions.AIRBORNE, "pos": Vector2(0, 3000), "air": true, "km": -1.0})
+		out.append_array(fields)
+	else:
+		out.append_array(fields.slice(0, 8))
+	return out
+
+## Where the raid starts (game x, z)
+func raid_start() -> Vector2:
+	return _raid_start
+
+## Fixes the player's start (an option name from start_options())
+func choose_start(option_name: String) -> void:
+	GameSettings.airfield = option_name
 	_plan_player_start()
 
 func _plan_player_start() -> void:
@@ -297,6 +334,27 @@ func _spawn_defenders() -> void:
 		if fid >= 0:
 			_ground_section(_default_type(defender), defender, "intercept", 4, fid, 4.0)
 
+## The player's aircraft abandoned (plane.gd): out of the fight from now on
+func on_player_bailed(chute: Node3D) -> void:
+	if player_lost:
+		return
+	player_lost = true
+	player_bailed = true
+	_lost_at = time
+	losses[side] += 1
+	_chute = chute
+	player = null                          # wingmen and enemies forget the empty aircraft
+
+## Debrief once the player is out: a moment after being shot down, or once
+## the parachute is down (or after a long enough look)
+func _player_out_done() -> bool:
+	var t := time - _lost_at
+	if not player_bailed:
+		return t > 3.5
+	if is_instance_valid(_chute) and not _chute.landed:
+		return t > 75.0
+	return t > 4.0
+
 ## Called by main.gd once the player's aircraft exists
 func set_player(p: Node3D) -> void:
 	player = p
@@ -320,7 +378,7 @@ func _process(delta: float) -> void:
 		_say("You are down.")
 	_update_fires(delta)
 	if not finished:
-		if player_lost and time - _lost_at > 3.5:
+		if player_lost and _player_out_done():
 			finished = true                  # the battle may still be raging without you
 		elif outcome != "" and time - _decided_at > 6.0 and get_tree().get_nodes_in_group("bombs").is_empty():
 			finished = true
@@ -495,6 +553,11 @@ func on_aircraft_down(n: Node, by) -> void:
 		else:
 			player_kills.append(what)
 			_say("You shot down a %s." % what)
+	elif by != null and is_instance_valid(by) and by.is_in_group("flak"):
+		if s == side:
+			_say("Enemy flak brings down a friendly %s." % what)
+		else:
+			_say("Flak brings down a %s." % what)
 	elif n in _wing:
 		_say("Your wingman is going down.")
 	elif n.is_in_group("bombers") and s != side:
@@ -626,7 +689,7 @@ func markers() -> Array:
 
 func result_title() -> String:
 	if player_lost and outcome == "":
-		return "SHOT DOWN"
+		return "BAILED OUT" if player_bailed else "SHOT DOWN"
 	if outcome == "":
 		return "MISSION IN PROGRESS"
 	return "MISSION SUCCESS" if outcome == side else "MISSION FAILED"
@@ -648,6 +711,8 @@ func result_lines() -> Array:
 		out.append("You shot nothing down.")
 	else:
 		out.append("Your kills: %s." % ", ".join(PackedStringArray(player_kills)))
-	if player_lost:
+	if player_bailed:
+		out.append("You bailed out.")
+	elif player_lost:
 		out.append("You were shot down.")
 	return out

@@ -16,7 +16,7 @@ const TYPES := {
 		"mass": 3000.0, "wing_area": 22.0, "span": 11.2, "thrust": 15000.0,
 		"cd0": 0.025, "stall_deg": 16.0,
 		"pitch_power": 4.0, "roll_power": 6.0, "yaw_power": 1.5,
-		"wheels": [Vector3(-1.6, -1.5, -2.0), Vector3(1.6, -1.5, -2.0), Vector3(0.0, -1.2, 3.8)],
+		"wheels": [Vector3(-1.6, -1.5, -2.0), Vector3(1.6, -1.5, -2.0), Vector3(0.0, -0.27, 3.8)],
 		"guns": [Vector3(-4.5, 0, -0.8), Vector3(-3.0, 0, -0.8), Vector3(3.0, 0, -0.8), Vector3(4.5, 0, -0.8)],
 		"gun_interval": 0.02, "gun_ammo": 2000, "gun_speed": 800.0, "gun_label": ".303 MG",
 		"cannons": [Vector3(-6.0, 0, -0.5), Vector3(6.0, 0, -0.5)],
@@ -59,7 +59,7 @@ const TYPES := {
 		"camera": [18.0, 4.5], "hitbox": Vector3(10.0, 1.5, 9.0),
 	},
 	"f22": {
-		"name": "Lockheed Martin F-22 Raptor", "side": "any",
+		"name": "Lockheed Martin F-22 Raptor", "side": "any", "free_flight_only": true,
 		"short": "F-22",
 		"desc": "Mach 2 scenery scout with a bottomless tank.",
 		"model": "res://scenes/plane/f22/f22_model.gd",
@@ -78,10 +78,12 @@ const TYPES := {
 
 const ORDER := ["spitfire", "hurricane", "bf109", "f22"]
 
-## Aircraft a pilot of `side` ("raf" / "lw") may fly
-static func for_side(side: String) -> Array:
+## Aircraft a pilot of `side` ("raf" / "lw") may fly (the F-22 only in Free Flight)
+static func for_side(side: String, free_flight := false) -> Array:
 	var out : Array = []
 	for k in ORDER:
+		if TYPES[k].get("free_flight_only", false) and not free_flight:
+			continue
 		if TYPES[k].side == side or TYPES[k].side == "any":
 			out.append(k)
 	return out

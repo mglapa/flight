@@ -19,6 +19,7 @@ const GAP := 18.0
 const BALL_R := 86.0
 const DIAL_R := 76.0
 const RADAR_RANGE := 3000.0
+const BRACKET_RANGE := 12000.0     # aircraft brackets drawn out to this range (m)
 
 const TXT        := Color(0.92, 0.94, 0.96)
 const TXT_DIM    := Color(0.62, 0.67, 0.72)
@@ -467,6 +468,7 @@ func _draw_front() -> void:
 		return
 	_draw_ball_overlay(_ball_centre(), BALL_R * _s)
 	_draw_gunsight()
+	_draw_bail_bar()
 	if plane.is_stalling and fmod(_blink, 0.6) < 0.4:
 		var vp := get_viewport().get_visible_rect().size
 		var box := Rect2(Vector2(vp.x * 0.5 - 90 * _s, 120 * _s), Vector2(180, 48) * _s)
@@ -475,6 +477,20 @@ func _draw_front() -> void:
 		sb.set_corner_radius_all(int(24 * _s))
 		_front.draw_style_box(sb, box)
 		_text(_front, Vector2(vp.x * 0.5, 154 * _s), "STALL", 26.0, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, true)
+
+## Holding the bail-out button: a bar fills toward the jump
+func _draw_bail_bar() -> void:
+	var k : float = plane.get("bail_progress") if "bail_progress" in plane else 0.0
+	if k <= 0.0:
+		return
+	var vp := get_viewport().get_visible_rect().size
+	var w := 460.0 * _s
+	var box := Rect2(Vector2(vp.x * 0.5 - w * 0.5 - 26 * _s, vp.y * 0.30), Vector2(w + 52 * _s, 112 * _s))
+	_panel(_front, box)
+	_text(_front, Vector2(vp.x * 0.5, box.position.y + 38 * _s), "BAILING OUT", 22.0, BAD, HORIZONTAL_ALIGNMENT_CENTER, true)
+	_bar(_front, Rect2(Vector2(vp.x * 0.5 - w * 0.5, box.position.y + 54 * _s), Vector2(w, 16 * _s)), k, BAD)
+	_text(_front, Vector2(vp.x * 0.5, box.position.y + 96 * _s), "release to stay with the aircraft", 13.0, TXT_DIM,
+		HORIZONTAL_ALIGNMENT_CENTER)
 
 ## World direction → point on the nav ball (null if on the far side)
 func _ball_point(c: Vector2, r: float, dir: Vector3, min_z := 0.12) -> Variant:
@@ -618,10 +634,50 @@ func _draw_mission() -> void:
 
 	if not is_instance_valid(camera) or not is_instance_valid(plane) or _map.big_open:
 		return
+	_draw_brackets(ci)
 	_edge_used.clear()
 	for m in mission.markers():
 		var col : Color = ACCENT if m[1] == mission.target_name.to_upper() else (ALLY if m[2] else BAD)
 		_marker(ci, WorldOrigin.to_scene(m[0]), m[1], col)
+
+## Corner brackets round every aircraft in view: red enemies, blue friends.
+## Faint and grey far away, solid and full colour up close; enemies inside
+## gun range also show their range.
+func _draw_brackets(ci: Control) -> void:
+	var vp := get_viewport().get_visible_rect().size
+	var cam_pos := camera.global_position
+	var fwd := -camera.global_transform.basis.z
+	var px_per_rad := vp.y * 0.5 / tan(deg_to_rad(camera.fov) * 0.5)
+	for e in get_tree().get_nodes_in_group("ai"):
+		if not is_instance_valid(e) or e.get("_dead") == true:
+			continue
+		var p : Vector3 = (e as Node3D).global_position
+		var rel := p - cam_pos
+		var dist := rel.length()
+		if dist > BRACKET_RANGE or rel.dot(fwd) < 1.0:
+			continue
+		var sp := camera.unproject_position(p)
+		if sp.x < 0.0 or sp.y < 0.0 or sp.x > vp.x or sp.y > vp.y:
+			continue
+		var foe : bool = e.is_in_group("enemies")
+		var near := 1.0 - smoothstep(400.0, 7000.0, dist)
+		var base := BAD if foe else ALLY
+		var grey := Color(0.75, 0.75, 0.78)
+		var col := Color(grey.lerp(base, 0.35 + 0.65 * near), lerpf(0.22, 0.95, near))
+		# Box sized to the aircraft (bombers are bigger), never smaller than a mark
+		var span := 11.0 if e.is_in_group("bombers") else 6.0
+		var h := clampf(span / dist * px_per_rad * 1.3, 8.0 * _s, 90.0 * _s)
+		var arm := maxf(h * 0.45, 4.0 * _s)
+		var lw := maxf(1.0, 2.0 * _s)
+		for sx in [-1.0, 1.0]:
+			for sy in [-1.0, 1.0]:
+				var c := sp + Vector2(sx, sy) * h
+				var pts := PackedVector2Array([c - Vector2(0, sy * arm), c, c - Vector2(sx * arm, 0)])
+				ci.draw_polyline(pts, Color(0, 0, 0, col.a * 0.45), lw + 2.0 * _s)
+				ci.draw_polyline(pts, col, lw)
+		if foe and dist < 1500.0:
+			_text(ci, sp + Vector2(0, h + 16 * _s), "%d m" % int(round(dist / 10.0) * 10.0), 11.0,
+				Color(col, col.a * 0.9), HORIZONTAL_ALIGNMENT_CENTER, true)
 
 ## Diamond on screen, or an arrow on the screen edge pointing toward it
 func _marker(ci: Control, p: Vector3, label: String, col: Color) -> void:

@@ -101,6 +101,15 @@ var cannon_ammo   : int   = CANNON_AMMO_MAX
 
 var fuel : float = MAX_FUEL
 
+const ParachuteScript := preload("res://scenes/fx/parachute.gd")
+
+## Emitted when the pilot jumps, with the parachutist (the camera follows him)
+signal bailed_out(chute: Node3D)
+const BAIL_TIME := 1.6           # s holding the bail-out button
+var bail_progress := 0.0         # 0..1 while the button is held (HUD bar)
+var _dead := false               # no pilot aboard: the aircraft flies on, uncontrolled
+var _derelict_age := 0.0
+
 const SERVICE_TIME := 6.0        # s stopped on a friendly airfield to turn the aircraft round
 var _service_timer := 0.0
 
@@ -152,10 +161,24 @@ var _smoke_puff_script = preload("res://scenes/enemies/smoke_puff.gd")
 var _hit_flash_script  = preload("res://scenes/enemies/hit_flash.gd")
 
 # -- Audio --
-## Drag a looping engine .wav/.ogg onto this in the Inspector
-@export var engine_sound : AudioStream
-
-var _audio_player : AudioStreamPlayer
+# Engine — procedurally generated: a V12's firing pulses (each cylinder a
+# little different, which gives the rumble), the propeller's beat and wind
+const _ENG_RATE := 22050.0
+var _eng_player   : AudioStreamPlayer
+var _eng_playback : AudioStreamGeneratorPlayback
+var _eng_jet := false
+var _eng_rpm := 0.0
+var _eng_fire_phase := 0.0
+var _eng_prop_phase := 0.0
+var _eng_cyl := 0
+var _eng_cyl_gain : Array[float] = []
+var _eng_since := 1.0          # seconds since the last firing pulse
+var _eng_pulse := 0.0
+var _eng_lp := 0.0
+var _eng_lp2 := 0.0
+var _eng_wind := 0.0
+var _eng_misfire := 0.0        # chance a cylinder fails to fire (engine damage)
+var _eng_running := true
 
 # Gun audio — procedurally generated
 const _GUN_MIX_RATE     := 22050.0
@@ -229,6 +252,10 @@ func _apply_profile() -> void:
 func get_velocity() -> Vector3:
 	return velocity
 
+## The mission treats an empty cockpit as out of the fight
+func is_airborne() -> bool:
+	return not _dead
+
 ## Puts the aircraft at its start: `at` is world space (for a ground start,
 ## `at.y` is the ground height and the wheels are set on it, tail down).
 func spawn(at: Vector3, basis_: Basis, on_ground_: bool) -> void:
@@ -269,19 +296,27 @@ func _setup_gun_audio() -> void:
 	_gun_player.play()
 	_gun_playback = _gun_player.get_stream_playback() as AudioStreamGeneratorPlayback
 
+## Engine: synthesised on the fly (see _engine_sample), lo-fi but alive
 func _setup_engine_audio() -> void:
-	if not engine_sound:
-		return
-	_audio_player = AudioStreamPlayer.new()
-	_audio_player.stream    = engine_sound
-	_audio_player.volume_db = -10.0
-	add_child(_audio_player)
-	_audio_player.play()
+	var gen := AudioStreamGenerator.new()
+	gen.mix_rate = _ENG_RATE
+	gen.buffer_length = 0.08
+	_eng_player = AudioStreamPlayer.new()
+	_eng_player.stream = gen
+	_eng_player.volume_db = -7.0
+	add_child(_eng_player)
+	_eng_player.play()
+	_eng_playback = _eng_player.get_stream_playback() as AudioStreamGeneratorPlayback
+	_eng_jet = aircraft_type == "f22"
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(aircraft_type)
+	for i in range(12):
+		_eng_cyl_gain.append(rng.randf_range(0.7, 1.15))
+	_eng_rpm = 0.0 if on_ground else _eng_rpm_target()
 
 func _process(delta: float) -> void:
-	if _audio_player:
-		_audio_player.pitch_scale = lerpf(0.5, 1.8, throttle)
-		_audio_player.volume_db   = lerpf(-18.0, -6.0, throttle)
+	_eng_rpm = lerpf(_eng_rpm, _eng_rpm_target(), minf(1.0, 1.6 * delta))
+	_push_engine_audio()
 	_push_gun_audio()
 
 	# Smoke emission — only when damaged
@@ -303,6 +338,64 @@ func _process(delta: float) -> void:
 			_smoke_opacity  = 1.0
 			_smoke_interval = 0.05
 			_smoke_timer    = minf(_smoke_timer, 0.05)
+
+## Crankshaft rpm the engine is heading for (windmilling when it has stopped)
+func _eng_rpm_target() -> float:
+	var eng_ok : bool = comp_hp["engine"] > 0 and fuel > 0.0 and not _dead
+	_eng_running = eng_ok
+	_eng_misfire = float(COMP_MAX - comp_hp["engine"]) / float(COMP_MAX) * 0.35
+	if not eng_ok:
+		return clampf(airspeed_display * 12.0, 0.0, 1400.0)
+	return lerpf(950.0, 3000.0, throttle) + clampf(airspeed_display - 60.0, 0.0, 120.0) * 2.0
+
+func _push_engine_audio() -> void:
+	if not _eng_playback:
+		return
+	var frames := _eng_playback.get_frames_available()
+	if frames <= 0:
+		return
+	var dt := 1.0 / _ENG_RATE
+	var crank := _eng_rpm / 60.0                     # rev/s
+	var fire_rate := crank * 6.0 if _eng_running else 0.0   # 12 cylinders, 4-stroke
+	var blade_rate := crank * 0.477 * 3.0            # reduction gear, three blades
+	var load := 0.35 + 0.65 * throttle
+	var cutoff := lerpf(420.0, 1500.0, throttle)
+	var a1 := 1.0 - exp(-TAU * cutoff * dt)
+	var a2 := 1.0 - exp(-TAU * 160.0 * dt)
+	var wind_amt := clampf(airspeed_display / 160.0, 0.0, 1.0)
+	wind_amt *= wind_amt
+	var prop_amt := clampf(_eng_rpm / 3000.0, 0.0, 1.0)
+	for _i in range(frames):
+		var n := randf() * 2.0 - 1.0
+		var x := 0.0
+		if _eng_jet:
+			# Turbofan: a deep roar with a faint whine
+			_eng_lp += a1 * (n - _eng_lp)
+			_eng_lp2 += a2 * (_eng_lp - _eng_lp2)
+			_eng_prop_phase = fmod(_eng_prop_phase + crank * 1.4 * dt, 1.0)
+			x = (_eng_lp * 1.4 + _eng_lp2 * 3.0) * load + sin(TAU * _eng_prop_phase) * 0.05 * prop_amt
+		else:
+			_eng_fire_phase += fire_rate * dt
+			if _eng_fire_phase >= 1.0:
+				_eng_fire_phase -= 1.0
+				_eng_cyl = (_eng_cyl + 1) % 12
+				_eng_since = 0.0
+				_eng_pulse = 0.0 if randf() < _eng_misfire else _eng_cyl_gain[_eng_cyl]
+			_eng_since += dt
+			# Each firing: a sharp exhaust bark that dies away in ~2 ms
+			var env := exp(-_eng_since * 520.0) * _eng_pulse
+			var bark := env * (0.75 + 0.6 * n)
+			_eng_lp += a1 * (bark * 2.4 - _eng_lp)
+			# Propeller: air chopped by the blades
+			_eng_prop_phase = fmod(_eng_prop_phase + blade_rate * dt, 1.0)
+			var chop := 0.5 + 0.5 * sin(TAU * _eng_prop_phase)
+			_eng_lp2 += a2 * (n - _eng_lp2)
+			x = _eng_lp * load + _eng_lp2 * chop * chop * 2.2 * prop_amt
+		# Wind over the airframe rises with speed
+		_eng_wind += 0.08 * (n - _eng_wind)
+		x += _eng_wind * wind_amt * 0.5
+		x = x / (1.0 + absf(x))                       # soft clip
+		_eng_playback.push_frame(Vector2(x, x) * 0.8)
 
 func _push_gun_audio() -> void:
 	if not _gun_playback:
@@ -374,6 +467,20 @@ func _physics_process(delta: float) -> void:
 	var yaw_input := Input.get_axis("yaw_left", "yaw_right")
 	var throttle_up := Input.get_action_strength("throttle_up")
 	var throttle_down := Input.get_action_strength("throttle_down")
+	if _dead:
+		# Abandoned: the engine winds down and she drops into a slow spiral
+		pitch_input = -0.06
+		roll_input = 0.3
+		yaw_input = 0.0
+		throttle_up = 0.0
+		throttle_down = 0.0
+		throttle = maxf(throttle - 0.5 * delta, 0.0)
+		_derelict_age += delta
+		if _derelict_age > 120.0:
+			queue_free()
+			return
+	else:
+		_update_bail(delta)
 
 	throttle = clampf(throttle + (throttle_up - throttle_down) * throttle_response * delta, 0.0, 1.0)
 	if _model:
@@ -384,12 +491,12 @@ func _physics_process(delta: float) -> void:
 	# GUNS & CANNON
 	# ========================
 	_fire_timer = maxf(_fire_timer - delta, 0.0)
-	if Input.is_action_pressed("fire") and _fire_timer == 0.0 and gun_ammo > 0:
+	if not _dead and Input.is_action_pressed("fire") and _fire_timer == 0.0 and gun_ammo > 0:
 		_fire_next_gun()
 		_fire_timer = FIRE_INTERVAL
 
 	_cannon_timer = maxf(_cannon_timer - delta, 0.0)
-	if Input.is_action_pressed("fire_cannon") and _cannon_timer == 0.0 and cannon_ammo > 0:
+	if not _dead and Input.is_action_pressed("fire_cannon") and _cannon_timer == 0.0 and cannon_ammo > 0:
 		_fire_cannon()
 		_cannon_timer = CANNON_INTERVAL
 
@@ -637,7 +744,7 @@ func _physics_process(delta: float) -> void:
 		if max_pen > 0.0:
 			# 15 mph ≈ 6.7 m/s downward — high-speed ground impact is fatal
 			if velocity.y < -6.7:
-				queue_free()
+				_crash()
 				return
 			global_position.y += max_pen
 			if velocity.y < 0.0:
@@ -703,9 +810,47 @@ func _physics_process(delta: float) -> void:
 			velocity = Vector3.ZERO
 	_service(delta)
 
+## Hit the ground too hard: a fireball where she went in
+func _crash() -> void:
+	var smoke := get_tree().get_first_node_in_group("smoke_field")
+	if smoke:
+		var w := WorldOrigin.to_world(global_position)
+		smoke.explosion(global_position, 0.7, w.y < 2.0)
+	queue_free()
+
+## Holding the bail-out button fills a bar; letting go early cancels
+func _update_bail(delta: float) -> void:
+	if not Input.is_action_pressed("bail_out"):
+		bail_progress = 0.0
+		return
+	bail_progress = minf(bail_progress + delta / BAIL_TIME, 1.0)
+	if bail_progress >= 1.0:
+		_bail_out()
+
+func _bail_out() -> void:
+	_dead = true
+	bail_progress = 0.0
+	_service_timer = 0.0
+	for g in ["player", "fighters", "side_" + GameSettings.side]:
+		remove_from_group(g)
+	var b := global_transform.basis
+	var chute := Node3D.new()
+	chute.set_script(ParachuteScript)
+	chute.suit = Color(0.36, 0.40, 0.46) if GameSettings.side == "raf" else Color(0.42, 0.40, 0.34)
+	# Out over the side, thrown up and back by the slipstream
+	chute.velocity = velocity * 0.55 + b.y * 4.0 + b.x * 2.0
+	get_parent().add_child(chute)
+	chute.global_position = global_position + b.y * 1.6 + b.x * 0.8
+	chute.rotation.y = rotation.y
+	_say("You bailed out.")
+	get_tree().call_group("mission", "on_player_bailed", chute)
+	bailed_out.emit(chute)
+
 ## Ground crew: stopped on a friendly airfield, the aircraft is repaired,
 ## refuelled and rearmed after a short turnaround.
 func _service(delta: float) -> void:
+	if _dead:
+		return
 	var stopped := on_ground and velocity.length() < 0.5
 	if not stopped or not _needs_service():
 		if _service_timer > 0.0 and not stopped:

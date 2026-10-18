@@ -98,8 +98,10 @@ func _input(event: InputEvent) -> void:
 		var mb := event as InputEventMouseButton
 		if big_open and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_zoom(1.0 / 1.25)
+			get_viewport().set_input_as_handled()     # not the camera zoom too
 		elif big_open and mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_zoom(1.25)
+			get_viewport().set_input_as_handled()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if not big_open and mb.position.distance_to(_mini_centre()) < MINI_R * _s:
 				big_open = true
@@ -119,8 +121,10 @@ func _input(event: InputEvent) -> void:
 		var b := (event as InputEventJoypadButton).button_index
 		if b == JOY_BUTTON_RIGHT_SHOULDER:
 			_zoom(1.0 / 1.25)
+			get_viewport().set_input_as_handled()
 		elif b == JOY_BUTTON_LEFT_SHOULDER:
 			_zoom(1.25)
+			get_viewport().set_input_as_handled()
 
 func _zoom(f: float) -> void:
 	big_half_m = clampf(big_half_m * f, BIG_MIN_M, BIG_MAX_M)

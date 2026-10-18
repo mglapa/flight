@@ -10,6 +10,9 @@ extends Node3D
 ##   head for `goal_world`   — patrol / intercept vector from the mission
 ## The mission director (scenes/mission/mission.gd) chooses targets.
 
+const ParachuteScript := preload("res://scenes/fx/parachute.gd")
+const CREW := 1                   ## crew who might bail out
+const BAIL_CHANCE := 0.65
 const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
 const AIR_DENSITY := 1.225
 const GRAVITY     := 9.81
@@ -64,6 +67,7 @@ var _burn_timer := 0.0
 var _dead := false
 var _dead_vel := Vector3.ZERO
 var _dead_age := 0.0
+var _bail_times : Array = []       ## _dead_age at which each surviving crewman jumps
 var _last_attacker : Node = null
 
 var _p : Dictionary = {}
@@ -471,6 +475,7 @@ func _start_falling() -> void:
 	if _dead:
 		return
 	_dead = true
+	_plan_bail_out()
 	on_ground = false
 	_dead_vel = _velocity if _velocity.length() > 1.0 else -global_transform.basis.z * TARGET_SPEED
 	target = null
@@ -478,6 +483,10 @@ func _start_falling() -> void:
 
 func _update_falling(delta: float) -> void:
 	_dead_age += delta
+	if not _bail_times.is_empty() and _dead_age >= _bail_times[0]:
+		_bail_times.pop_front()
+		if global_position.y - _ground_y(global_position) > 120.0:
+			_jump()
 	_dead_vel.y -= 20.0 * delta
 	global_position += _dead_vel * delta
 	rotate_object_local(Vector3(1, 0, 0), 2.2 * delta)
@@ -491,6 +500,24 @@ func _update_falling(delta: float) -> void:
 		if global_position.y <= g + 5.0 and _smoke:
 			_smoke.explosion(Vector3(global_position.x, g, global_position.z), 0.6)
 		queue_free()
+
+## Who gets out: each of the crew has a fair chance, one after another
+func _plan_bail_out() -> void:
+	var t := randf_range(0.8, 2.5)
+	for i in range(CREW):
+		if randf() < BAIL_CHANCE:
+			_bail_times.append(t)
+		t += randf_range(0.7, 1.6)
+
+func _jump() -> void:
+	var chute := Node3D.new()
+	chute.set_script(ParachuteScript)
+	chute.suit = Color(0.36, 0.40, 0.46) if side == "raf" else Color(0.42, 0.40, 0.34)
+	var b := global_transform.basis
+	chute.velocity = _dead_vel * 0.5 + Vector3.UP * 3.0
+	get_parent().add_child(chute)
+	chute.global_position = global_position + b.y * 1.5 + b.x * randf_range(-2.0, 2.0)
+	chute.rotation.y = randf() * TAU
 
 func _puff(kind: int, radius: float, life: float) -> void:
 	if _smoke:

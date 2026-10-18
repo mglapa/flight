@@ -97,28 +97,3 @@ static func other(side: String) -> String:
 ## Is the player on the attacking side?
 static func player_attacks(m: Dictionary, side: String) -> bool:
 	return m.attacker != "" and m.attacker == side
-
-## Great-circle distance in km (for the menu, before the map is loaded)
-static func km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-	var p1 := deg_to_rad(lat1)
-	var p2 := deg_to_rad(lat2)
-	var dl := deg_to_rad(lon2 - lon1)
-	var a := sin((p2 - p1) * 0.5) ** 2 + cos(p1) * cos(p2) * sin(dl * 0.5) ** 2
-	return 6371.0 * 2.0 * asin(sqrt(a))
-
-## Airfields the player may start from: [name, km to target (map-scaled)].
-## Defenders get the nearest few fields of their side; Free Flight gets all.
-static func start_fields(m: Dictionary, side: String, airfield_list: Array, map_scale: float) -> Array:
-	var out : Array = []
-	var ref := [51.1279, 1.3134]                      # Dover
-	if m.has("target"):
-		ref = [m.target[1], m.target[2]]
-	for a in airfield_list:
-		if a[1] != side:
-			continue
-		out.append([a[0], km_between(ref[0], ref[1], a[2], a[3]) * map_scale])
-	out.sort_custom(func(x: Array, y: Array) -> bool: return x[1] < y[1])
-	if m.id == "free":
-		out.push_front([AIRBORNE, 0.0])
-		return out
-	return out.slice(0, 8)

@@ -115,6 +115,8 @@ func _process(_delta: float) -> void:
 		_open(true)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if mission == null:              # still loading, or picking a start
+		return
 	var toggle := false
 	if event is InputEventKey and event.pressed and not event.echo:
 		toggle = (event as InputEventKey).keycode == KEY_ESCAPE or (event as InputEventKey).keycode == KEY_P
