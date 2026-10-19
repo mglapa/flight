@@ -14,21 +14,11 @@ const BAIL_CHANCE := 0.6
 const COMP_MAX        : int   = 8      # bombers are tough — 8 HP per component
 const BASE_FUEL_DRAIN : float = 1.0
 const FUEL_LEAK_RATE  : float = 3.0
-const AIR_DENSITY := 1.225
+const FlightModel := preload("res://scenes/plane/flight_model.gd")
 const GRAVITY     := 9.81
-const CL_SLOPE    := 5.0
-const CL_0        := 0.15
-const OSWALD      := 0.75
-const STALL_ALPHA := 0.279
-
-const PITCH_POWER     := 1.5           # slow, heavy control response
-const ROLL_POWER      := 1.0
-const PITCH_STABILITY := 1.0
-const YAW_STABILITY   := 4.0
-const DIHEDRAL_EFFECT := 1.5
-const PITCH_DAMPING   := 3.0
-const ROLL_DAMPING    := 3.0
-const YAW_DAMPING     := 3.5
+## Flight values every bomber shares: heavy, slow controls and a low G limit
+const HANDLING := {"oswald": 0.75, "cl_max": 1.55, "stall_deg": 16.0, "g_max": 2.5, "g_min": 0.0,
+	"pitch_auth": 2.5, "roll_max": 0.55, "roll_auth": 2.0, "yaw_auth": 1.0, "mcrit": 0.65}
 
 const CRUISE        := 75.0            # m/s (~270 km/h)
 const FIRE_RANGE    := 500.0
@@ -40,7 +30,8 @@ const WP_RADIUS     := 1500.0
 const PROFILES := {
 	"he111": {
 		"name": "He 111", "model": "res://scenes/enemies/he111/he111_model.gd",
-		"mass": 14000.0, "wing_area": 86.5, "span": 22.6, "thrust": 26000.0, "cd0": 0.030,
+		# Two Jumo 211s
+		"mass": 12000.0, "wing_area": 86.5, "span": 22.6, "cd0": 0.030, "power": 1650000.0, "rated_alt": 4500.0,
 		"bullet_speed": 750.0, "bay": Vector3(0.0, -0.9, -0.8), "bombs": 8,
 		"hitbox": Vector3(24.0, 3.0, 18.0),
 		# Gunner muzzles and the hemisphere each covers: nose, dorsal, ventral, tail
@@ -49,7 +40,8 @@ const PROFILES := {
 	},
 	"wellington": {
 		"name": "Wellington", "model": "res://scenes/enemies/wellington/wellington_model.gd",
-		"mass": 12500.0, "wing_area": 78.0, "span": 26.3, "thrust": 24000.0, "cd0": 0.030,
+		# Two Pegasus radials
+		"mass": 11000.0, "wing_area": 78.0, "span": 26.3, "cd0": 0.032, "power": 1450000.0, "rated_alt": 3000.0,
 		"bullet_speed": 745.0, "bay": Vector3(0.0, -1.15, -1.2), "bombs": 9,
 		"hitbox": Vector3(26.0, 3.5, 19.0),
 		# Nose turret, tail turret, port and starboard beam guns
@@ -86,13 +78,13 @@ var _bail_times : Array = []       ## _dead_age at which each surviving crewman 
 var _last_attacker : Node = null
 
 var _p : Dictionary
-var _velocity := Vector3.ZERO
-var _pitch_rate := 0.0
-var _roll_rate := 0.0
-var _yaw_rate := 0.0
+## The shared flight model (it holds the velocity and rates)
+var fm := FlightModel.new()
+var _velocity : Vector3:
+	get: return fm.velocity
+	set(v): fm.velocity = v
 var _throttle := 0.85
 var _fuel := 4000.0
-var _aspect := 6.0
 
 var _gun_cds : Array[float] = [0.0, 0.0, 0.0, 0.0]
 var _hostiles : Array = []
@@ -116,7 +108,10 @@ func _ready() -> void:
 	if not PROFILES.has(bomber_type):
 		bomber_type = "he111"
 	_p = PROFILES[bomber_type]
-	_aspect = _p.span * _p.span / _p.wing_area
+	var flight := HANDLING.duplicate()
+	flight.merge(_p)
+	fm.setup(flight)
+	fm.alpha_margin = -deg_to_rad(2.0)
 	bombs_left = int(_p.bombs)
 	add_to_group("aircraft")
 	add_to_group("bombers")
@@ -188,28 +183,10 @@ func _update_flight(delta: float) -> void:
 	var up    : Vector3 =  global_transform.basis.y
 	var right : Vector3 =  global_transform.basis.x
 	var speed : float   = maxf(_velocity.length(), 5.0)
-	var vel_fwd : float = _velocity.dot(fwd)
-	var alpha := 0.0
-	var beta := 0.0
-	if speed > 3.0:
-		alpha = atan2(-_velocity.dot(up), maxf(vel_fwd, 3.0))
-		beta  = atan2(_velocity.dot(right), maxf(vel_fwd, 3.0))
-	var q  : float = 0.5 * AIR_DENSITY * speed * speed
-	var qS : float = q * _p.wing_area
-	var effectiveness : float = clampf(q / (0.5 * AIR_DENSITY * CRUISE * CRUISE), 0.0, 1.5)
-	var cl : float
-	if absf(alpha) < STALL_ALPHA:
-		cl = CL_0 + CL_SLOPE * alpha
-	else:
-		cl = (CL_0 + CL_SLOPE * STALL_ALPHA * signf(alpha)) * maxf(1.0 - (absf(alpha) - STALL_ALPHA) * 2.0, 0.2)
 	var wing_dmg : float = float(COMP_MAX - comp_hp["wing"]) / float(COMP_MAX)
 	var elev_dmg : float = float(COMP_MAX - comp_hp["elevator"]) / float(COMP_MAX)
 	var rudd_dmg : float = float(COMP_MAX - comp_hp["rudder"]) / float(COMP_MAX)
 	var eng_dmg  : float = float(COMP_MAX - comp_hp["engine"]) / float(COMP_MAX)
-	var lift_force : Vector3 = up * qS * cl * (1.0 - wing_dmg * 0.9)
-	var cd : float = _p.cd0 + (cl * cl) / (PI * _aspect * OSWALD)
-	var drag_force : Vector3 = -_velocity.normalized() * qS * cd if speed > 1.0 else Vector3.ZERO
-	var side_force : Vector3 = -right * qS * beta * 0.5
 
 	# ── Autopilot: hold the slot, or fly the route ────────────────────────────
 	var tgt : Vector3
@@ -247,48 +224,33 @@ func _update_flight(delta: float) -> void:
 	if agl < 400.0:
 		tgt = global_position + Vector3(fwd.x, 0.0, fwd.z).normalized() * 600.0 + Vector3.UP * 250.0
 	var goal_dir := (tgt - global_position).normalized()
-	var ai_roll := -clampf(goal_dir.dot(right) * 2.0, -0.5, 0.5)
+	# Bank toward the goal, no more than 25°.  ai_roll < 0 rolls right.
+	var bank := atan2(right.y, up.y)
+	var want_bank := -clampf(goal_dir.dot(right) * 1.2, -0.45, 0.45)
+	var ai_roll := clampf((want_bank - bank) * 1.5, -1.0, 1.0)
 	# Height hold: climb or sink at a rate proportional to the height error
 	var vs_want := clampf((tgt.y - global_position.y) * 0.08, -6.0, 6.0)
 	if speed < CRUISE - 8.0:
 		vs_want = minf(vs_want, (speed - (CRUISE - 8.0)) * 0.5)     # slow: trade height for speed
-	var ai_pitch := clampf((vs_want - _velocity.y) * 0.12 + 0.04 - _pitch_rate * 0.6, -0.4, 0.5)
-	# Stall protection: ease off as the angle of attack nears the stall, push if past it
-	var a_warn := STALL_ALPHA * 0.6
-	if alpha > a_warn:
-		ai_pitch = minf(ai_pitch, lerpf(0.2, -0.4, clampf((alpha - a_warn) / (STALL_ALPHA - a_warn), 0.0, 1.0)))
+	var path := asin(clampf(_velocity.y / speed, -1.0, 1.0))
+	var g_want := cos(path) / maxf(cos(bank), 0.5) + clampf((vs_want - _velocity.y) * 0.04, -0.4, 0.6)
 
 	var throttle_target := clampf(0.6 + (want - speed) * 0.06, 0.0, 1.0)
 	_throttle = clampf(lerpf(_throttle, throttle_target, 1.5 * delta), 0.0, 1.0)
 	var fuel_tank_dmg : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
 	_fuel = maxf(_fuel - (BASE_FUEL_DRAIN * _throttle + FUEL_LEAK_RATE * fuel_tank_dmg) * delta, 0.0)
-	var thrust_force : Vector3 = fwd * _p.thrust * _throttle * (1.0 - eng_dmg) * (1.0 if _fuel > 0.0 else 0.0)
-	var weight : Vector3 = Vector3.DOWN * _p.mass * GRAVITY
-	_velocity += ((lift_force + drag_force + side_force + thrust_force + weight) / _p.mass) * delta
+
+	if _model:
+		_model.set_controls(clampf((g_want - 1.0) * 2.0, -1.0, 1.0), -ai_roll, 0.0, _throttle)
+	fm.dmg_wing = wing_dmg
+	fm.dmg_elev = elev_dmg
+	fm.dmg_rudder = rudd_dmg
+	fm.power_scale = (1.0 - eng_dmg) * (1.0 if _fuel > 0.0 else 0.0)
+	fm.step(self, delta, 0.0, -ai_roll, 0.0, _throttle, g_want)
 	if assist != Vector3.INF:
 		# Formation-keeping help (a real crew has a lifetime of practice): damps
 		# the slow swings the autopilot alone can't
 		_velocity = _velocity.lerp(assist, clampf(delta * 0.5, 0.0, 1.0))
-
-	if _model:
-		_model.set_controls(ai_pitch, -ai_roll, 0.0, _throttle)
-	var pitch_accel : float = ai_pitch * PITCH_POWER * (1.0 - elev_dmg) * effectiveness
-	var roll_accel  : float = -ai_roll * ROLL_POWER * (1.0 - wing_dmg) * effectiveness
-	var yaw_accel   : float = 0.0
-	pitch_accel -= alpha * PITCH_STABILITY * (1.0 - elev_dmg) * effectiveness
-	yaw_accel   += beta * YAW_STABILITY * (1.0 - rudd_dmg) * effectiveness
-	roll_accel  -= beta * DIHEDRAL_EFFECT * effectiveness
-	pitch_accel -= _pitch_rate * (PITCH_DAMPING * 0.5 + PITCH_DAMPING * 0.5 * effectiveness)
-	roll_accel  -= _roll_rate * (ROLL_DAMPING * 0.5 + ROLL_DAMPING * 0.5 * effectiveness)
-	yaw_accel   -= _yaw_rate * (YAW_DAMPING * 0.5 + YAW_DAMPING * 0.5 * effectiveness)
-	_pitch_rate = clampf(_pitch_rate + pitch_accel * delta, -0.8, 0.8)
-	_roll_rate  = clampf(_roll_rate + roll_accel * delta, -1.5, 1.5)
-	_yaw_rate   = clampf(_yaw_rate + yaw_accel * delta, -0.4, 0.4)
-	rotate_object_local(Vector3(1, 0, 0),  _pitch_rate * delta)
-	rotate_object_local(Vector3(0, 0, 1), -_roll_rate * delta)
-	rotate_object_local(Vector3(0, 1, 0), -_yaw_rate * delta)
-	global_transform.basis = global_transform.basis.orthonormalized()
-	global_position += _velocity * delta
 	if global_position.y <= _ground_y(global_position) + 2.0:
 		_start_falling()
 

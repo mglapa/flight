@@ -28,6 +28,7 @@ var _yaw_offset   : float = 0.0
 var _pitch_offset : float = 0.0
 var _zoom_blend   : float = 0.0   # 0 = look at the plane, 1 = look down the guns
 var zoom_level    : int = 0
+var _shake_t := 0.0
 
 func _unhandled_input(event: InputEvent) -> void:
 	var step := 0
@@ -125,3 +126,12 @@ func _physics_process(delta: float) -> void:
 		var current_quat  := Quaternion(global_transform.basis.orthonormalized())
 		var desired_quat  := Quaternion(desired_basis)
 		global_transform.basis = Basis(current_quat.slerp(desired_quat, minf(1.0, rot_speed * delta)))
+
+	# Buffet: the view shakes near the stall, in a spin or past the
+	# compressibility limit.  The lens offsets leave the follow untouched.
+	var fm = target.get("fm")
+	var shake : float = fm.buffet if fm != null else 0.0
+	_shake_t += delta
+	var amp := shake * shake * 0.06 * (1.0 - _zoom_blend * 0.8)
+	h_offset = (sin(_shake_t * 37.0) + sin(_shake_t * 23.0 + 1.3)) * amp
+	v_offset = (sin(_shake_t * 41.0 + 0.7) + sin(_shake_t * 29.0)) * amp

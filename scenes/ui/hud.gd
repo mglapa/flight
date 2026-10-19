@@ -7,6 +7,7 @@ extends CanvasLayer
 ## (ball markings, gunsight, warnings).
 
 const NAVBALL_SHADER := preload("res://scenes/ui/navball.gdshader")
+const VISION_SHADER := preload("res://scenes/ui/pilot_vision.gdshader")
 const MapView := preload("res://scenes/ui/map_view.gd")
 const MissionMenu := preload("res://scenes/ui/mission_menu.gd")
 
@@ -54,6 +55,8 @@ var _map : Control
 var _mission_layer : Control
 var _edge_used : Array = []
 var _menu : Control
+var _vision : ColorRect
+var _vision_mat : ShaderMaterial
 
 func _ready() -> void:
 	_font = _make_font(500)
@@ -80,6 +83,17 @@ func _ready() -> void:
 
 	_mission_layer = _layer("Mission")
 	_mission_layer.draw.connect(_draw_mission)
+
+	# Grey-out / black-out over the world and the instruments alike
+	_vision = ColorRect.new()
+	_vision.name = "PilotVision"
+	_vision.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_vision.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_vision_mat = ShaderMaterial.new()
+	_vision_mat.shader = VISION_SHADER
+	_vision.material = _vision_mat
+	_vision.visible = false
+	add_child(_vision)
 
 	_map = Control.new()
 	_map.name = "Map"
@@ -120,6 +134,7 @@ func _process(delta: float) -> void:
 	_s = minf(vp.x / REF.x, vp.y / REF.y)
 	_origin = Vector2((vp.x - REF.x * _s) * 0.5, vp.y - REF.y * _s)
 	_mission_layer.queue_redraw()
+	_update_vision()
 	if not is_instance_valid(plane):
 		_ball.visible = false
 		_back.queue_redraw()
@@ -138,6 +153,15 @@ func _process(delta: float) -> void:
 
 	_back.queue_redraw()
 	_front.queue_redraw()
+
+func _update_vision() -> void:
+	var fm = plane.fm if is_instance_valid(plane) else null
+	var on : bool = fm != null and (fm.grey > 0.005 or fm.red > 0.005 or fm.blackout > 0.005)
+	_vision.visible = on
+	if on:
+		_vision_mat.set_shader_parameter("grey", fm.grey)
+		_vision_mat.set_shader_parameter("black", fm.blackout)
+		_vision_mat.set_shader_parameter("red", fm.red)
 
 # ---------------------------------------------------------------------------
 # Layout helpers (reference coordinates → screen)
@@ -262,7 +286,7 @@ func _draw_flight_data(rect: Rect2) -> void:
 	_text(_back, Vector2(x0 + 20 * _s, y0 + 210 * _s), "%+d FPM" % vs, 17.0, vs_col)
 
 	# G meter
-	var g_col := TXT if g < 5.0 and g > -1.5 else (WARN if g < 7.0 else BAD)
+	var g_col := TXT if plane.fm.grey < 0.05 and plane.fm.red < 0.05 else (WARN if plane.fm.grey < 0.7 else BAD)
 	_text(_back, Vector2(x0 + 150 * _s, y0 + 210 * _s), "%.1f G" % g, 17.0, g_col, HORIZONTAL_ALIGNMENT_LEFT, true)
 
 	# Throttle: vertical bar on the right of the panel

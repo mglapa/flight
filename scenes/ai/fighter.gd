@@ -14,21 +14,11 @@ const ParachuteScript := preload("res://scenes/fx/parachute.gd")
 const CREW := 1                   ## crew who might bail out
 const BAIL_CHANCE := 0.65
 const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
-const AIR_DENSITY := 1.225
+const FlightModel := preload("res://scenes/plane/flight_model.gd")
 const GRAVITY     := 9.81
-const CL_SLOPE    := 5.0
-const CL_0        := 0.15
-const OSWALD      := 0.78
 const COMP_MAX    : int = 4
 
-const PITCH_STABILITY := 1.5
-const YAW_STABILITY   := 5.0
-const DIHEDRAL_EFFECT := 2.0
-const PITCH_DAMPING   := 3.5
-const ROLL_DAMPING    := 4.0
-const YAW_DAMPING     := 4.0
-
-const TARGET_SPEED    := 82.0    # m/s cruise / combat speed
+const TARGET_SPEED    := 82.0    # m/s indicated: cruise / combat speed
 const MIN_AGL         := 280.0   # pull up below this (in combat)
 const PURSUIT_DIST    := 400.0   # m behind the target to aim for when close
 const FIRE_RANGE      := 520.0
@@ -72,20 +62,14 @@ var _last_attacker : Node = null
 
 var _p : Dictionary = {}
 var _mass := 3000.0
-var _wing_area := 20.0
-var _thrust := 14000.0
-var _cd0 := 0.025
-var _stall := 0.279
-var _pitch_power := 4.0
-var _roll_power := 6.0
-var _aspect := 6.0
 var _guns : Array = []
 var _cannons : Array = []
 
-var _velocity := Vector3.ZERO
-var _pitch_rate := 0.0
-var _roll_rate := 0.0
-var _yaw_rate := 0.0
+## The same flight model as the player (it holds the velocity and rates)
+var fm := FlightModel.new()
+var _velocity : Vector3:
+	get: return fm.velocity
+	set(v): fm.velocity = v
 var _throttle := 0.85
 var _fuel := 1800.0
 
@@ -143,20 +127,14 @@ func _apply_profile() -> void:
 		fighter_type = "bf109"
 	_p = AircraftTypes.TYPES[fighter_type]
 	_mass = _p.mass
-	_wing_area = _p.wing_area
-	_thrust = _p.thrust
-	_cd0 = _p.cd0
-	_stall = deg_to_rad(_p.stall_deg)
-	_pitch_power = _p.pitch_power
-	_roll_power = _p.roll_power
-	_aspect = _p.span * _p.span / _wing_area
+	fm.setup(_p)
+	fm.alpha_margin = -deg_to_rad(1.0)       # AI pilots stay just short of the stall
 	_guns = _p.guns
 	_cannons = _p.cannons
 	_gun_ammo = int(_p.gun_ammo)
 	_cannon_ammo = int(_p.cannon_ammo)
 	_fuel = float(_p.fuel) * 1.5
-	var cl_max := CL_0 + CL_SLOPE * _stall
-	_rotate_speed = 1.3 * sqrt(2.0 * _mass * GRAVITY / (AIR_DENSITY * _wing_area * cl_max))
+	_rotate_speed = 1.25 * fm.stall_speed(global_position.y)
 	# Three-point attitude: pitch that puts the main and tail wheels on the ground
 	var m : Vector3 = _p.wheels[0]
 	var t : Vector3 = _p.wheels[2]
@@ -219,7 +197,7 @@ func _ground_roll(delta: float) -> void:
 		if scramble_delay <= 0.0:
 			state = State.ROLLING
 		return
-	_roll_speed += (_thrust / _mass * 0.85 - 0.4) * delta
+	_roll_speed += (fm.thrust_at(global_position.y, _roll_speed) / _mass * 0.85 - 0.4) * delta
 	global_position += _heading * _roll_speed * delta
 	# The tail comes up as speed builds, then she flies herself off
 	var f := smoothstep(0.35, 0.8, _roll_speed / _rotate_speed)
@@ -258,34 +236,13 @@ func _fly(delta: float) -> void:
 	var up    : Vector3 =  global_transform.basis.y
 	var right : Vector3 =  global_transform.basis.x
 	var speed : float   = maxf(_velocity.length(), 5.0)
+	# Speeds below are indicated: the same feel at any height
+	var tas_k : float = 1.0 / sqrt(maxf(FlightModel.density(global_position.y) / FlightModel.RHO0, 0.2))
 
-	var vel_fwd   : float = _velocity.dot(fwd)
-	var vel_up    : float = _velocity.dot(up)
-	var vel_right : float = _velocity.dot(right)
-	var alpha := 0.0
-	var beta := 0.0
-	if speed > 3.0:
-		alpha = atan2(-vel_up, maxf(vel_fwd, 3.0))
-		beta  = atan2(vel_right, maxf(vel_fwd, 3.0))
-
-	var q  : float = 0.5 * AIR_DENSITY * speed * speed
-	var qS : float = q * _wing_area
-	var effectiveness : float = clampf(q / (0.5 * AIR_DENSITY * 80.0 * 80.0), 0.0, 1.5)
-
-	var cl : float
-	if absf(alpha) < _stall:
-		cl = CL_0 + CL_SLOPE * alpha
-	else:
-		var cl_at_stall : float = CL_0 + CL_SLOPE * _stall * signf(alpha)
-		cl = cl_at_stall * maxf(1.0 - (absf(alpha) - _stall) * 2.0, 0.2)
 	var wing_dmg : float = float(COMP_MAX - comp_hp["wing"]) / float(COMP_MAX)
 	var elev_dmg : float = float(COMP_MAX - comp_hp["elevator"]) / float(COMP_MAX)
 	var rudd_dmg : float = float(COMP_MAX - comp_hp["rudder"]) / float(COMP_MAX)
 	var eng_dmg  : float = float(COMP_MAX - comp_hp["engine"]) / float(COMP_MAX)
-	var lift_force : Vector3 = up * qS * cl * (1.0 - wing_dmg * 0.9)
-	var cd : float = _cd0 + (cl * cl) / (PI * _aspect * OSWALD)
-	var drag_force : Vector3 = -_velocity.normalized() * qS * cd if speed > 1.0 else Vector3.ZERO
-	var side_force : Vector3 = -right * qS * beta * 0.5
 
 	# ── Where to go ───────────────────────────────────────────────────────────
 	var pos := global_position
@@ -300,12 +257,12 @@ func _fly(delta: float) -> void:
 		or agl - sink * 5.0 < floor_agl * 0.5)
 
 	var goal : Vector3
-	var want_speed := TARGET_SPEED
+	var want_speed := TARGET_SPEED * tas_k
 	var assist := Vector3.INF
 	var shoot := false
 	if state == State.CLIMB_OUT:
 		goal = pos + _heading * 2500.0 + Vector3.UP * 500.0
-		want_speed = TARGET_SPEED + 10.0
+		want_speed = (TARGET_SPEED + 10.0) * tas_k
 		if agl > CLIMB_OUT_AGL:
 			state = State.FLYING
 	elif has_target:
@@ -319,8 +276,8 @@ func _fly(delta: float) -> void:
 		else:
 			goal = tp - tf * (PURSUIT_DIST * clampf(1.0 - dist / 1500.0, 0.0, 1.0))
 		# Close in fast, then settle just above the target's speed at gun range
-		var tspeed : float = target.get_velocity().length() if target.has_method("get_velocity") else TARGET_SPEED
-		want_speed = maxf(tspeed, 60.0) + clampf((dist - 180.0) * 0.06, -5.0, 35.0)
+		var tspeed : float = target.get_velocity().length() if target.has_method("get_velocity") else TARGET_SPEED * tas_k
+		want_speed = maxf(tspeed, 70.0 * tas_k) + clampf((dist - 180.0) * 0.06, -5.0, 35.0)
 		shoot = true
 	elif _leader_flying():
 		var lb := formation_leader.global_transform.basis
@@ -349,31 +306,27 @@ func _fly(delta: float) -> void:
 	_throttle = clampf(lerpf(_throttle, throttle_target, 1.5 * delta), 0.0, 1.0)
 	var fuel_tank_dmg : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
 	_fuel = maxf(_fuel - (BASE_FUEL_DRAIN * _throttle + FUEL_LEAK_RATE * fuel_tank_dmg) * delta, 0.0)
-	var thrust_force : Vector3 = fwd * _thrust * _throttle * (1.0 - eng_dmg) * (1.0 if _fuel > 0.0 else 0.0)
-	var weight : Vector3 = Vector3.DOWN * _mass * GRAVITY
-	_velocity += ((lift_force + drag_force + side_force + thrust_force + weight) / _mass) * delta
-	if assist != Vector3.INF:
-		_velocity = _velocity.lerp(assist, clampf(delta * 0.6, 0.0, 1.0))      # formation-keeping help
 
-	# ── Stick ─────────────────────────────────────────────────────────────────
+	# ── Stick: a roll demand, and the G the pilot wants ──────────────────────
 	# Roll convention: ai_roll < 0 rolls right.  Bank angle: right wing down < 0.
 	var bank := atan2(right.y, up.y)
 	var pitch_now := asin(clampf(fwd.y, -1.0, 1.0))
-	var ai_pitch := 0.0
 	var ai_roll := 0.0
+	var g_want := 1.0
 	if too_low:
-		# Recover: wings level, then hold a steady climb (a full pull would stall)
+		# Recover: wings level, then hold a steady climb
 		ai_roll = clampf(-bank * 1.5, -1.0, 1.0)
 		if absf(bank) < 0.6:
-			ai_pitch = clampf((deg_to_rad(20.0) - pitch_now) * 3.0, -0.4, 1.0)
+			g_want = 1.0 + clampf((deg_to_rad(20.0) - pitch_now) * 6.0, -0.5, 3.0)
 		else:
-			ai_pitch = 0.15 if up.y > 0.0 else 0.0     # roll upright before pulling
+			g_want = 1.5 if up.y > 0.0 else 0.3     # roll upright before pulling
 	elif shoot:
 		# Pursuit: bank the target into the canopy and pull
 		var goal_dir := (goal - pos).normalized()
 		var behind := clampf(-goal_dir.dot(fwd), 0.0, 1.0)
 		ai_roll = -clampf(goal_dir.dot(right) * 3.0, -1.0, 1.0)
-		ai_pitch = clampf(goal_dir.dot(up) * 2.5 + behind * 0.8 + 0.05, -1.0, 1.0)
+		var pull := clampf(goal_dir.dot(up) * 2.5 + behind * 0.8 + 0.05, -1.0, 1.0)
+		g_want = up.y + pull * (4.0 if pull > 0.0 else 2.0)
 	else:
 		# Flight director: coordinated turn toward the goal, gentle climb or descent
 		var to := goal - pos
@@ -384,31 +337,18 @@ func _fly(delta: float) -> void:
 		var want_bank := -clampf(err * 1.4, -1.05, 1.05)
 		ai_roll = clampf((want_bank - bank) * 2.0, -1.0, 1.0)
 		var gamma := clampf(atan2(to.y, maxf(to_h.length(), 1.0)), -0.35, 0.35)
-		ai_pitch = clampf((gamma - pitch_now) * 3.0 + absf(sin(bank)) * 0.6 + 0.05, -0.6, 1.0)
-	var alpha_warn := _stall * 0.7
-	if alpha > alpha_warn and ai_pitch > 0.0:
-		ai_pitch *= maxf(0.0, 1.0 - (alpha - alpha_warn) / (_stall - alpha_warn))
+		var path := asin(clampf(_velocity.y / speed, -1.0, 1.0))
+		g_want = cos(path) / maxf(cos(bank), 0.35) + clampf((gamma - path) * 5.0, -1.5, 2.5)
 
 	if _model:
-		_model.set_controls(ai_pitch, -ai_roll, 0.0, _throttle)
-	var pitch_accel : float = ai_pitch * _pitch_power * (1.0 - elev_dmg) * effectiveness
-	var roll_accel  : float = -ai_roll * _roll_power * (1.0 - wing_dmg) * effectiveness
-	var yaw_accel   : float = 0.0
-	pitch_accel -= alpha * PITCH_STABILITY * (1.0 - elev_dmg) * effectiveness
-	yaw_accel   += beta * YAW_STABILITY * (1.0 - rudd_dmg) * effectiveness
-	roll_accel  -= beta * DIHEDRAL_EFFECT * effectiveness
-	pitch_accel -= _pitch_rate * (PITCH_DAMPING * 0.5 + PITCH_DAMPING * 0.5 * effectiveness)
-	roll_accel  -= _roll_rate * (ROLL_DAMPING * 0.5 + ROLL_DAMPING * 0.5 * effectiveness)
-	yaw_accel   -= _yaw_rate * (YAW_DAMPING * 0.5 + YAW_DAMPING * 0.5 * effectiveness)
-	_pitch_rate = clampf(_pitch_rate + pitch_accel * delta, -1.5, 1.5)
-	_roll_rate  = clampf(_roll_rate + roll_accel * delta, -4.0, 4.0)
-	_yaw_rate   = clampf(_yaw_rate + yaw_accel * delta, -0.6, 0.6)
-	rotate_object_local(Vector3(1, 0, 0),  _pitch_rate * delta)
-	rotate_object_local(Vector3(0, 0, 1), -_roll_rate * delta)
-	rotate_object_local(Vector3(0, 1, 0), -_yaw_rate * delta)
-	global_transform.basis = global_transform.basis.orthonormalized()
-
-	global_position += _velocity * delta
+		_model.set_controls(clampf((g_want - 1.0) / 4.0, -1.0, 1.0), -ai_roll, 0.0, _throttle)
+	fm.dmg_wing = wing_dmg
+	fm.dmg_elev = elev_dmg
+	fm.dmg_rudder = rudd_dmg
+	fm.power_scale = (1.0 - eng_dmg) * (1.0 if _fuel > 0.0 else 0.0)
+	fm.step(self, delta, 0.0, -ai_roll, 0.0, _throttle, g_want)
+	if assist != Vector3.INF:
+		_velocity = _velocity.lerp(assist, clampf(delta * 0.6, 0.0, 1.0))      # formation-keeping help
 	if global_position.y <= ground + 1.0 and state == State.FLYING:
 		_start_falling()
 		return

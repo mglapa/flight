@@ -6,46 +6,12 @@ extends Node3D
 ## Uses real aerodynamic principles: lift from AoA, drag polar, weathervane
 ## stability, and proper damping. Tuned for a War Thunder / IL-2 feel.
 
-# -- Aircraft specs --
-@export_group("Aircraft")
-## Aircraft mass in kg (Spitfire Mk V loaded)
-@export var aircraft_mass: float = 3000.0
-## Wing area in m²
-@export var wing_area: float = 22.0
-## Wing span in m (used for aspect ratio)
-@export var wing_span: float = 11.2
-## Max engine thrust in Newtons (~1,200 hp Merlin engine)
-@export var max_thrust: float = 15000.0
-## How quickly throttle responds
-@export var throttle_response: float = 2.0
-
-@export_group("Control Sensitivity")
-## Pitch rate authority (rad/s² at cruise speed)
-@export var pitch_power: float = 4.0
-## Roll rate authority
-@export var roll_power: float = 6.0
-## Yaw rate authority (rudder is weaker than ailerons)
-@export var yaw_power: float = 1.5
-
-@export_group("Stability & Damping")
-## Pitch stability — tail pushes nose toward velocity (reduces AoA)
-@export var pitch_stability: float = 1.0
-## Yaw stability — vertical tail fin keeps nose aligned with velocity
-@export var yaw_stability: float = 5.0
-## Dihedral effect — sideslip causes corrective roll
-@export var dihedral_effect: float = 2.0
-## Pitch angular damping
-@export var pitch_damping: float = 3.5
-## Roll angular damping
-@export var roll_damping: float = 4.0
-## Yaw angular damping
-@export var yaw_damping: float = 4.0
-## Auto-level strength (gently rolls toward wings-level with no input)
-@export var auto_level: float = 0.5
+## How quickly the throttle lever moves
+const THROTTLE_RESPONSE := 2.0
 
 # -- Constants --
-const AIR_DENSITY: float = 1.225  # kg/m³ at sea level
 const GRAVITY: float = 9.81
+const FlightModel := preload("res://scenes/plane/flight_model.gd")
 
 const AircraftTypes := preload("res://scenes/plane/aircraft_types.gd")
 
@@ -112,30 +78,26 @@ var _derelict_age := 0.0
 
 const SERVICE_TIME := 6.0        # s stopped on a friendly airfield to turn the aircraft round
 var _service_timer := 0.0
+var _rumble_timer := 0.0
 
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
 var _model : Node3D = null
 var _profile : Dictionary = {}
 
-# -- Aero coefficients --
-## Lift curve slope per radian (typical finite wing)
-var cl_slope: float = 5.0
-## Lift coefficient at zero angle of attack (cambered airfoil)
-var cl_0: float = 0.15
-## Parasitic drag coefficient (clean WW2 fighter)
-var cd_0: float = 0.025
-## Oswald span efficiency factor
-var oswald: float = 0.78
-## Wing aspect ratio (computed in _ready)
-var aspect_ratio: float
-## Critical angle of attack in degrees
-var stall_alpha_deg: float = 16.0
-
-# -- Physics state --
-var velocity: Vector3 = Vector3.ZERO
-var pitch_rate: float = 0.0   # rad/s, positive = nose up
-var roll_rate: float = 0.0    # rad/s, positive = roll right (clockwise from behind)
-var yaw_rate: float = 0.0     # rad/s, positive = nose right
+# -- Physics: the shared flight model holds the state --
+var fm := FlightModel.new()
+var velocity: Vector3:
+	get: return fm.velocity
+	set(v): fm.velocity = v
+var pitch_rate: float:        # rad/s, positive = nose up
+	get: return fm.pitch_rate
+	set(v): fm.pitch_rate = v
+var roll_rate: float:         # rad/s, positive = roll right
+	get: return fm.roll_rate
+	set(v): fm.roll_rate = v
+var yaw_rate: float:          # rad/s, positive = nose right
+	get: return fm.yaw_rate
+	set(v): fm.yaw_rate = v
 
 # -- Exposed to HUD --
 var throttle: float = 0.0
@@ -179,6 +141,18 @@ var _eng_lp2 := 0.0
 var _eng_wind := 0.0
 var _eng_misfire := 0.0        # chance a cylinder fails to fire (engine damage)
 var _eng_running := true
+var _eng_dmg := 0.0            # 0..1 engine damage: drives the rough running below
+var _eng_dead : Array[bool] = []   # cylinders that no longer fire
+var _eng_dead_n := 0
+var _eng_low := 0.0            # exhaust resonance (state-variable filter)
+var _eng_band := 0.0
+var _eng_low2 := 0.0           # second, higher body resonance
+var _eng_band2 := 0.0
+var _eng_dc := 0.0             # DC blocker
+var _eng_cycle := 0.0          # 720° of crank: the uneven beat of the firing order
+var _eng_surge := 0.0          # slow rpm hunting when the engine is hurt
+var _eng_knock := 1.0          # seconds since the last knock / backfire
+var _eng_bang := 1.0
 
 # Gun audio — procedurally generated
 const _GUN_MIX_RATE     := 22050.0
@@ -196,7 +170,6 @@ func _ready() -> void:
 	add_to_group("fighters")
 	add_to_group("side_" + GameSettings.side)
 	_apply_profile()
-	aspect_ratio = wing_span * wing_span / wing_area
 	throttle = 0.7
 	# Start airborne at the type's cruising speed
 	velocity = -global_transform.basis.z * float(_profile.get("start_speed", 80.0))
@@ -215,15 +188,8 @@ func _apply_profile() -> void:
 	_profile = AircraftTypes.TYPES[aircraft_type]
 	var p := _profile
 	aircraft_name = p.name
-	aircraft_mass = p.mass
-	wing_area = p.wing_area
-	wing_span = p.span
-	max_thrust = p.thrust
-	cd_0 = p.cd0
-	stall_alpha_deg = p.stall_deg
-	pitch_power = p.pitch_power
-	roll_power = p.roll_power
-	yaw_power = p.yaw_power
+	fm.setup(p)
+	fm.auto_level = 0.35         # a centred stick drifts back toward wings level
 	WHEEL_L = p.wheels[0]
 	WHEEL_R = p.wheels[1]
 	WHEEL_T = p.wheels[2]
@@ -311,11 +277,17 @@ func _setup_engine_audio() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(aircraft_type)
 	for i in range(12):
-		_eng_cyl_gain.append(rng.randf_range(0.7, 1.15))
+		_eng_cyl_gain.append(rng.randf_range(0.6, 1.25))
+		_eng_dead.append(false)
 	_eng_rpm = 0.0 if on_ground else _eng_rpm_target()
 
 func _process(delta: float) -> void:
-	_eng_rpm = lerpf(_eng_rpm, _eng_rpm_target(), minf(1.0, 1.6 * delta))
+	# A damaged engine hunts: the revs wander up and down
+	_eng_surge = clampf(_eng_surge + randf_range(-1.0, 1.0) * delta * 6.0 - _eng_surge * delta * 0.8, -1.0, 1.0)
+	var target := _eng_rpm_target()
+	if _eng_running:
+		target += _eng_surge * _eng_dmg * 450.0
+	_eng_rpm = lerpf(_eng_rpm, target, minf(1.0, 1.6 * delta))
 	_push_engine_audio()
 	_push_gun_audio()
 
@@ -343,11 +315,23 @@ func _process(delta: float) -> void:
 func _eng_rpm_target() -> float:
 	var eng_ok : bool = comp_hp["engine"] > 0 and fuel > 0.0 and not _dead
 	_eng_running = eng_ok
-	_eng_misfire = float(COMP_MAX - comp_hp["engine"]) / float(COMP_MAX) * 0.35
+	_eng_dmg = float(COMP_MAX - comp_hp["engine"]) / float(COMP_MAX)
+	_eng_misfire = _eng_dmg * 0.22
+	# Each hit kills another cylinder or two: the beat goes lumpy
+	var dead_n := int(round(_eng_dmg * 5.0))
+	if dead_n != _eng_dead_n:
+		_eng_dead_n = dead_n
+		var order := [3, 9, 6, 0, 10, 4, 1, 7, 11, 2, 5, 8]
+		for i in range(12):
+			_eng_dead[order[i]] = i < dead_n
 	if not eng_ok:
 		return clampf(airspeed_display * 12.0, 0.0, 1400.0)
 	return lerpf(950.0, 3000.0, throttle) + clampf(airspeed_display - 60.0, 0.0, 120.0) * 2.0
 
+## Piston engine: twelve exhaust pulses per two turns of the crank, each
+## ringing a low exhaust resonance; the cylinders' uneven strength gives the
+## deep, lumpy beat under the drone.  Damage kills cylinders, adds misfires,
+## knocking and backfires.  The F-22 gets a turbofan roar instead.
 func _push_engine_audio() -> void:
 	if not _eng_playback:
 		return
@@ -359,12 +343,21 @@ func _push_engine_audio() -> void:
 	var fire_rate := crank * 6.0 if _eng_running else 0.0   # 12 cylinders, 4-stroke
 	var blade_rate := crank * 0.477 * 3.0            # reduction gear, three blades
 	var load := 0.35 + 0.65 * throttle
-	var cutoff := lerpf(420.0, 1500.0, throttle)
-	var a1 := 1.0 - exp(-TAU * cutoff * dt)
-	var a2 := 1.0 - exp(-TAU * 160.0 * dt)
+	var a1 := 1.0 - exp(-TAU * lerpf(240.0, 650.0, throttle) * dt)
+	var a2 := 1.0 - exp(-TAU * 140.0 * dt)
+	# Exhaust resonance, a little higher with the revs
+	var rev := clampf(_eng_rpm / 3000.0, 0.0, 1.2)
+	var f_res := 2.0 * sin(PI * (70.0 + 50.0 * rev) * dt)
+	var f_res2 := 2.0 * sin(PI * (170.0 + 90.0 * rev) * dt)
+	var q_res := 0.45
+	var a_dc := 1.0 - exp(-TAU * 25.0 * dt)
 	var wind_amt := clampf(airspeed_display / 160.0, 0.0, 1.0)
 	wind_amt *= wind_amt
 	var prop_amt := clampf(_eng_rpm / 3000.0, 0.0, 1.0)
+	var d := _eng_dmg if _eng_running else 0.0
+	# Backfires: rare at first, frequent when the engine is badly hurt
+	if _eng_running and randf() < d * d * 1.6 * frames * dt:
+		_eng_bang = 0.0
 	for _i in range(frames):
 		var n := randf() * 2.0 - 1.0
 		var x := 0.0
@@ -380,22 +373,47 @@ func _push_engine_audio() -> void:
 				_eng_fire_phase -= 1.0
 				_eng_cyl = (_eng_cyl + 1) % 12
 				_eng_since = 0.0
-				_eng_pulse = 0.0 if randf() < _eng_misfire else _eng_cyl_gain[_eng_cyl]
+				var fires := not _eng_dead[_eng_cyl] and randf() >= _eng_misfire
+				_eng_pulse = _eng_cyl_gain[_eng_cyl] if fires else 0.0
+				if fires and randf() < d * 0.5:
+					_eng_knock = 0.0
 			_eng_since += dt
-			# Each firing: a sharp exhaust bark that dies away in ~2 ms
-			var env := exp(-_eng_since * 520.0) * _eng_pulse
-			var bark := env * (0.75 + 0.6 * n)
-			_eng_lp += a1 * (bark * 2.4 - _eng_lp)
+			_eng_cycle = fmod(_eng_cycle + crank * 0.5 * dt, 1.0)
+			# Exhaust pulse: a soft ~6 ms thump that rings the resonance
+			var env := exp(-_eng_since * 170.0) * _eng_pulse
+			var exc := env * (0.65 + 0.35 * n)
+			var hi := exc - _eng_low - q_res * _eng_band
+			_eng_band += f_res * hi
+			_eng_low += f_res * _eng_band
+			var hi2 := exc - _eng_low2 - 0.6 * _eng_band2
+			_eng_band2 += f_res2 * hi2
+			_eng_low2 += f_res2 * _eng_band2
+			_eng_lp += a1 * (exc - _eng_lp)
+			var body := _eng_low * 2.2 + _eng_band * 0.9 + _eng_band2 * 1.3 + _eng_lp * 0.9
+			# Firing-order beat under the drone
+			var beat := sin(TAU * _eng_cycle) * 0.22 + sin(TAU * _eng_cycle * 2.0 + 0.6) * 0.14
+			x = (body * 3.0 + beat * (0.4 + 0.6 * prop_amt)) * load
 			# Propeller: air chopped by the blades
 			_eng_prop_phase = fmod(_eng_prop_phase + blade_rate * dt, 1.0)
 			var chop := 0.5 + 0.5 * sin(TAU * _eng_prop_phase)
 			_eng_lp2 += a2 * (n - _eng_lp2)
-			x = _eng_lp * load + _eng_lp2 * chop * chop * 2.2 * prop_amt
+			x += _eng_lp2 * chop * chop * 1.6 * prop_amt
+			# Damage: rattle, knocking, backfires
+			if d > 0.0:
+				x += _eng_lp2 * d * 0.35 * (0.5 + 0.5 * sin(TAU * _eng_cycle * 6.0))
+				_eng_knock += dt
+				x += sin(TAU * 1450.0 * _eng_knock) * exp(-_eng_knock * 500.0) * 0.9 * d
+			if _eng_bang < 0.12:
+				_eng_bang += dt
+				var be := exp(-_eng_bang * 35.0)
+				x += (n * 0.9 + sin(TAU * 55.0 * _eng_bang) * 1.4) * be * 1.6
 		# Wind over the airframe rises with speed
 		_eng_wind += 0.08 * (n - _eng_wind)
 		x += _eng_wind * wind_amt * 0.5
+		_eng_dc += a_dc * (x - _eng_dc)
+		x -= _eng_dc
 		x = x / (1.0 + absf(x))                       # soft clip
-		_eng_playback.push_frame(Vector2(x, x) * 0.8)
+		_eng_playback.push_frame(Vector2(x, x) * 0.85)
 
 func _push_gun_audio() -> void:
 	if not _gun_playback:
@@ -461,8 +479,7 @@ func _physics_process(delta: float) -> void:
 	# ========================
 	# INPUT
 	# ========================
-	var stick_sensitivity: float = 0.5
-	var pitch_input := Input.get_axis("pitch_up", "pitch_down") * stick_sensitivity
+	var pitch_input := Input.get_axis("pitch_up", "pitch_down")
 	var roll_input := Input.get_axis("roll_right", "roll_left")
 	var yaw_input := Input.get_axis("yaw_left", "yaw_right")
 	var throttle_up := Input.get_action_strength("throttle_up")
@@ -482,10 +499,10 @@ func _physics_process(delta: float) -> void:
 	else:
 		_update_bail(delta)
 
-	throttle = clampf(throttle + (throttle_up - throttle_down) * throttle_response * delta, 0.0, 1.0)
+	throttle = clampf(throttle + (throttle_up - throttle_down) * THROTTLE_RESPONSE * delta, 0.0, 1.0)
 	if _model:
 		# roll_input is inverted (see ROLL below): -roll_input = roll right
-		_model.set_controls(pitch_input / stick_sensitivity, -roll_input, yaw_input, throttle)
+		_model.set_controls(pitch_input, -roll_input, yaw_input, throttle)
 
 	# ========================
 	# GUNS & CANNON
@@ -501,218 +518,28 @@ func _physics_process(delta: float) -> void:
 		_cannon_timer = CANNON_INTERVAL
 
 	# ========================
-	# AIRCRAFT AXES
+	# FLIGHT MODEL
 	# ========================
-	var fwd: Vector3 = -global_transform.basis.z   # nose direction
-	var up: Vector3 = global_transform.basis.y      # wing top direction
-	var right: Vector3 = global_transform.basis.x   # right wing direction
-
-	# ========================
-	# AIRSPEED & ALTITUDE
-	# ========================
-	current_speed = velocity.length()
-	airspeed_display = maxf(velocity.dot(fwd), 0.0)
-	altitude = global_position.y
-
-	# Velocity decomposed into aircraft body frame
-	var vel_fwd: float = velocity.dot(fwd)
-	var vel_up: float = velocity.dot(up)
-	var vel_right: float = velocity.dot(right)
-
-	# ========================
-	# ANGLE OF ATTACK & SIDESLIP
-	# ========================
-	var alpha: float = 0.0   # angle of attack (positive = nose above velocity)
-	var beta: float = 0.0    # sideslip angle
-
-	if current_speed > 3.0:
-		alpha = atan2(-vel_up, maxf(vel_fwd, 3.0))
-		beta = atan2(vel_right, maxf(vel_fwd, 3.0))
-
-	# ========================
-	# DYNAMIC PRESSURE
-	# ========================
-	var q: float = 0.5 * AIR_DENSITY * current_speed * current_speed
-	var qS: float = q * wing_area
-
-	# Control effectiveness scales with airspeed (normalized to ~290 km/h cruise)
-	var q_ref: float = 0.5 * AIR_DENSITY * 80.0 * 80.0
-	var effectiveness: float = clampf(q / q_ref, 0.0, 1.5)
-
-	# ========================
-	# LIFT
-	# ========================
-	var stall_alpha: float = deg_to_rad(stall_alpha_deg)
-	var cl: float
-
-	if absf(alpha) < stall_alpha:
-		# Normal flight: lift increases linearly with AoA
-		cl = cl_0 + cl_slope * alpha
-	else:
-		# Post-stall: lift drops gradually (not a cliff — more forgiving)
-		var cl_at_stall: float = cl_0 + cl_slope * stall_alpha * signf(alpha)
-		var excess: float = absf(alpha) - stall_alpha
-		cl = cl_at_stall * maxf(1.0 - excess * 2.0, 0.2)
-
-	is_stalling = absf(alpha) > stall_alpha and current_speed > 5.0
-
-	# Per-component damage factors (0.0 = healthy, 1.0 = destroyed)
 	var wing_dmg  : float = float(COMP_MAX - comp_hp["wing"])     / float(COMP_MAX)
 	var elev_dmg  : float = float(COMP_MAX - comp_hp["elevator"]) / float(COMP_MAX)
 	var rudd_dmg  : float = float(COMP_MAX - comp_hp["rudder"])   / float(COMP_MAX)
 	var eng_dmg   : float = float(COMP_MAX - comp_hp["engine"])   / float(COMP_MAX)
-	var lift_mult     : float = 1.0 - wing_dmg * 0.90    # wing: 10 % lift remains at 0 HP
-	var thrust_factor : float = 1.0 - eng_dmg            # engine: thrust → 0 when gone
-	var lift_force: Vector3 = up * qS * cl * lift_mult
-
-	# ========================
-	# DRAG (parasitic + induced)
-	# ========================
-	var cd: float = cd_0 + (cl * cl) / (PI * aspect_ratio * oswald)
-	# Post-stall: separated flow produces flat-plate drag far beyond polar prediction
-	if absf(alpha) > stall_alpha:
-		cd += (absf(alpha) - stall_alpha) * 1.8
-	var drag_force: Vector3 = Vector3.ZERO
-	if current_speed > 1.0:
-		drag_force = -velocity.normalized() * qS * cd
-
-	# ========================
-	# SIDE FORCE (fuselage resists sideways motion)
-	# ========================
-	var side_force: Vector3 = -right * qS * beta * 0.5
-
-	# ========================
-	# FUEL
-	# ========================
 	var fuel_tank_dmg : float = float(COMP_MAX - comp_hp["fuel_tank"]) / float(COMP_MAX)
 	fuel = maxf(fuel - (BASE_FUEL_DRAIN * throttle + FUEL_LEAK_RATE * fuel_tank_dmg) * delta, 0.0)
+	fm.dmg_wing = wing_dmg
+	fm.dmg_elev = elev_dmg
+	fm.dmg_rudder = rudd_dmg
+	fm.power_scale = (1.0 - eng_dmg) * (1.0 if fuel > 0.0 else 0.0)
+	# roll_input is inverted (user-swapped axis): -roll_input = roll right
+	fm.step(self, delta, pitch_input, -roll_input, yaw_input, throttle, NAN, on_ground)
 
-	# ========================
-	# THRUST
-	# ========================
-	var fuel_factor   : float = 1.0 if fuel > 0.0 else 0.0
-	var thrust_force: Vector3 = fwd * max_thrust * throttle * thrust_factor * fuel_factor
-
-	# ========================
-	# GRAVITY
-	# ========================
-	var weight: Vector3 = Vector3.DOWN * aircraft_mass * GRAVITY
-
-	# ========================
-	# TOTAL FORCE → VELOCITY
-	# ========================
-	var total_force: Vector3 = lift_force + drag_force + side_force + thrust_force + weight
-	var accel: Vector3 = total_force / aircraft_mass
-	velocity += accel * delta
-
-	# ========================
-	# G-FORCE (for HUD)
-	# ========================
-	g_force = (accel + Vector3.UP * GRAVITY).dot(up) / GRAVITY
-
-	# ========================
-	# ANGULAR ACCELERATIONS
-	# ========================
-
-	# Damage-scaled control authority
-	var eff_pitch_power     := pitch_power     * (1.0 - elev_dmg)
-	var eff_pitch_stability := pitch_stability * (1.0 - elev_dmg)
-	var eff_roll_power      := roll_power      * (1.0 - wing_dmg)
-	var eff_yaw_power       := yaw_power       * (1.0 - rudd_dmg)
-	var eff_yaw_stability   := yaw_stability   * (1.0 - rudd_dmg)
-
-	# --- Pilot control inputs ---
-	# pitch_input: +1 = S key / stick back = nose UP
-	var pitch_accel: float = pitch_input * eff_pitch_power * effectiveness
-	# roll_input: user-swapped axis, -roll_input gives correct direction
-	var roll_accel: float = -roll_input * eff_roll_power * effectiveness
-	# yaw_input: +1 = E key / stick right = nose RIGHT
-	var yaw_accel: float = yaw_input * eff_yaw_power * effectiveness
-
-	# --- Aerodynamic stability ---
-	# Horizontal stabilizer: reduces angle of attack (nose toward velocity)
-	pitch_accel -= alpha * eff_pitch_stability * effectiveness
-	# Vertical stabilizer (weathervane): reduces sideslip
-	yaw_accel += beta * eff_yaw_stability * effectiveness
-	# Dihedral effect: sideslip causes corrective roll
-	roll_accel -= beta * dihedral_effect * effectiveness
-
-	# --- Angular damping (resists rotation) ---
-	# Uses fixed + speed-dependent damping so the plane is always damped,
-	# but more so at high speed (like real aircraft)
-	pitch_accel -= pitch_rate * (pitch_damping * 0.5 + pitch_damping * 0.5 * effectiveness)
-	roll_accel -= roll_rate * (roll_damping * 0.5 + roll_damping * 0.5 * effectiveness)
-	yaw_accel -= yaw_rate * (yaw_damping * 0.5 + yaw_damping * 0.5 * effectiveness)
-
-	# --- Auto-level (gentle, only when no roll input) ---
-	if absf(roll_input) < 0.1 and not is_stalling:
-		var bank_angle: float = right.dot(Vector3.UP)
-		roll_accel -= bank_angle * auto_level * effectiveness
-
-	# --- Stall aerodynamics ---
-	# Four coupled effects that make a stall feel like a real departure:
-	if is_stalling:
-		var stall_over : float = clampf((absf(alpha) - stall_alpha) / stall_alpha, 0.0, 1.5)
-
-		# 1. Elevator authority bleeds away — separated flow over the tailplane
-		#    means the pilot can no longer hold the nose up.
-		pitch_accel -= (pitch_input * eff_pitch_power * effectiveness) \
-					   * clampf(stall_over * 0.75, 0.0, 0.75)
-
-		# 2. Nose-break: aerodynamic centre moves forward past stall,
-		#    creating a strong pitch-down moment even at low airspeed.
-		#    maxf(effectiveness, 0.35) ensures it fires when nearly stopped.
-		pitch_accel -= signf(alpha) * stall_over \
-					   * eff_pitch_stability * 5.0 * maxf(effectiveness, 0.35)
-
-		# 3. Autorotation: any pre-existing roll rate amplifies (spin entry).
-		#    A wings-level symmetric stall just pitches down; a stall in a
-		#    bank or turn will depart and roll hard.
-		roll_accel += roll_rate * stall_over * 3.5
-
-		# 4. Aileron authority also degrades — surfaces in separated flow.
-		roll_accel -= (-roll_input * eff_roll_power * effectiveness) \
-					  * clampf(stall_over * 0.70, 0.0, 0.70)
-
-		# 5. Small airframe asymmetry: prevents a perfectly symmetric stall
-		#    from being infinitely holdable; gives a natural wing-drop bias
-		#    that varies with position so it isn't the same every time.
-		roll_accel += sin(global_position.x * 0.01 + global_position.z * 0.007) \
-					  * 0.25 * stall_over
-
-		# 6. Adverse yaw from roll rate in stall — couples into spin entry.
-		yaw_accel -= roll_rate * stall_over * 1.5
-
-	# ========================
-	# UPDATE ROTATION RATES
-	# ========================
-	pitch_rate += pitch_accel * delta
-	roll_rate += roll_accel * delta
-	yaw_rate += yaw_accel * delta
-
-	# Clamp to realistic maximums
-	pitch_rate = clampf(pitch_rate, -1.5, 1.5)   # ~85°/s
-	roll_rate = clampf(roll_rate, -4.0, 4.0)      # ~230°/s (fighters roll fast)
-	yaw_rate = clampf(yaw_rate, -0.6, 0.6)        # ~35°/s
-
-	# ========================
-	# APPLY ROTATION (local axes)
-	# ========================
-	# Godot local axis conventions (right-hand rule):
-	#   +X rotation = pitch UP
-	#   +Z rotation = roll LEFT, so negate for roll RIGHT
-	#   +Y rotation = yaw LEFT, so negate for yaw RIGHT
-	rotate_object_local(Vector3(1, 0, 0), pitch_rate * delta)
-	rotate_object_local(Vector3(0, 0, 1), -roll_rate * delta)
-	rotate_object_local(Vector3(0, 1, 0), -yaw_rate * delta)
-
-	# Prevent floating-point drift in the basis
-	global_transform.basis = global_transform.basis.orthonormalized()
-
-	# ========================
-	# UPDATE POSITION
-	# ========================
-	global_position += velocity * delta
+	current_speed = fm.tas
+	airspeed_display = maxf(velocity.dot(-global_transform.basis.z), 0.0) * sqrt(fm.rho / FlightModel.RHO0)
+	altitude = global_position.y
+	is_stalling = fm.is_stalling
+	g_force = fm.g_force
+	var right: Vector3 = global_transform.basis.x
+	_feedback(delta)
 
 	# ========================
 	# GROUND / GEAR
@@ -809,6 +636,16 @@ func _physics_process(delta: float) -> void:
 		else:
 			velocity = Vector3.ZERO
 	_service(delta)
+
+## The buffet (stall, spin, compressibility) through the pad's motors
+func _feedback(delta: float) -> void:
+	_rumble_timer -= delta
+	if _rumble_timer > 0.0:
+		return
+	_rumble_timer = 0.1
+	var b := 0.0 if _dead else fm.buffet
+	if b > 0.05 and not Input.get_connected_joypads().is_empty():
+		Input.start_joy_vibration(0, b * 0.5, b * 0.3, 0.15)
 
 ## Hit the ground too hard: a fireball where she went in
 func _crash() -> void:
