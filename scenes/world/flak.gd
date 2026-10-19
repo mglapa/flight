@@ -203,6 +203,8 @@ func _pick_target(g: Dictionary) -> void:
 	var best : Node3D = null
 	var best_s := INF
 	for f in _foes[g.side]:
+		if not is_instance_valid(f[0]):
+			continue                        # shot down since the list was made
 		var d : float = (f[2] as Vector3).distance_to(g.pos)
 		var agl : float = f[1]
 		var s := d
@@ -225,10 +227,9 @@ func _pick_target(g: Dictionary) -> void:
 func _run_gun(g: Dictionary, delta: float) -> void:
 	g.recoil = maxf(0.0, g.recoil - delta * 2.5)
 	g.flash = maxf(0.0, g.flash - delta)
-	var t : Node3D = g.target
-	if t != null and (not is_instance_valid(t) or not t.is_airborne()):
+	if g.target != null and (not is_instance_valid(g.target) or not g.target.is_airborne()):
 		g.target = null
-		t = null
+	var t : Node3D = g.target
 	if t == null:
 		if g.node != null:
 			_pose(g, delta)
@@ -316,9 +317,9 @@ func _burst_heavy(p: Vector3, side: String) -> void:
 		_smoke.emit(sp, 2, 2.4, 0.2, 0.0)
 	_play(p, "boom", 1.0, 2.0)
 	for f in _foes[side]:
-		var n : Node3D = f[0]
-		if not is_instance_valid(n):
+		if not is_instance_valid(f[0]):
 			continue
+		var n : Node3D = f[0]
 		var d := WorldOrigin.to_world(n.global_position).distance_to(p)
 		if d > HEAVY_REACH:
 			continue
@@ -350,8 +351,10 @@ func _update_shells(delta: float) -> void:
 		s[2] += delta
 		var hit : Node3D = null
 		for f in _foes[s[3]]:
+			if not is_instance_valid(f[0]):
+				continue
 			var n : Node3D = f[0]
-			if is_instance_valid(n) and _seg_dist(WorldOrigin.to_world(n.global_position), a, b) < LIGHT_REACH:
+			if _seg_dist(WorldOrigin.to_world(n.global_position), a, b) < LIGHT_REACH:
 				hit = n
 				break
 		if hit != null:

@@ -297,6 +297,22 @@ func _build_ui() -> void:
 	wrow.add_child(wpick)
 	wrow.add_child(whint)
 
+	var trow := _row(col, "TIME")
+	var tpick := _option(420)
+	var thint := _label("", 26, TXT_DIM)
+	for t in GameSettings.TIMES:
+		tpick.add_item(t[1])
+		tpick.set_item_metadata(tpick.item_count - 1, t)
+		if is_equal_approx(t[0], GameSettings.time_of_day):
+			tpick.select(tpick.item_count - 1)
+			thint.text = t[2]
+	tpick.item_selected.connect(func(i: int):
+		var t : Array = tpick.get_item_metadata(i)
+		GameSettings.time_of_day = t[0]
+		thint.text = t[2])
+	trow.add_child(tpick)
+	trow.add_child(thint)
+
 	var srow := _row(col, "MAP SCALE")
 	var scale_group := ButtonGroup.new()
 	var scale_hint := _label("", 26, TXT_DIM)

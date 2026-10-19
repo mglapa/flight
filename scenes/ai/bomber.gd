@@ -96,6 +96,7 @@ var _smoke_opacity := 0.0
 
 var _hit_flash_script = preload("res://scenes/enemies/hit_flash.gd")
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
+const Bullet := preload("res://scenes/plane/bullet.gd")
 var _bomb_script = preload("res://scenes/fx/bomb.gd")
 var _body_rid : RID
 var _model : Node3D = null
@@ -320,10 +321,13 @@ func _update_gunners(delta: float) -> void:
 
 func _fire_gunner(target: Node3D, muzzle: Vector3) -> void:
 	var bs : float = _p.bullet_speed
-	var dist := target.global_position.distance_to(muzzle)
+	var r := target.global_position - muzzle
 	var tv : Vector3 = target.get_velocity() if target.has_method("get_velocity") else Vector3.ZERO
-	var lead := target.global_position + (tv - _velocity) * (dist / bs) * 0.65
-	var aim := (lead - muzzle).normalized()
+	# Gunners judge lead and drop by eye: they allow for only part of either
+	var aim := r.normalized()
+	var sol := Bullet.intercept(r, _velocity, tv, bs, Bullet.DRAG_MG, muzzle.y)
+	if not sol.is_empty():
+		aim = aim.slerp(sol[0], 0.65)
 	var b := global_transform.basis
 	aim = (aim + b.x * randf_range(-GUN_SPREAD, GUN_SPREAD) + b.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
 	var bullet := Node3D.new()

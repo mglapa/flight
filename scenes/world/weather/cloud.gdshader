@@ -5,6 +5,7 @@ shader_type spatial;
 render_mode diffuse_lambert, specular_disabled, cull_back;
 
 uniform float self_light = 0.3;
+global uniform vec4 sky_tint;   // dims and warms the self-light with the time of day
 
 varying vec3 col;
 
@@ -13,7 +14,7 @@ void vertex() {
 }
 
 void fragment() {
-	ALBEDO = col;
-	EMISSION = col * self_light;
+	ALBEDO = col * mix(vec3(1.0), sky_tint.rgb, 0.75);
+	EMISSION = col * self_light * sky_tint.rgb;
 	ROUGHNESS = 1.0;
 }

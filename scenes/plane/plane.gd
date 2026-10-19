@@ -77,10 +77,14 @@ var _dead := false               # no pilot aboard: the aircraft flies on, uncon
 var _derelict_age := 0.0
 
 const SERVICE_TIME := 6.0        # s stopped on a friendly airfield to turn the aircraft round
+const FLYOVER_SERVICE_ALT := 304.8   # m (1,000 ft) above a friendly field: a low pass services the aircraft
 var _service_timer := 0.0
 var _rumble_timer := 0.0
 
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
+const Bullet := preload("res://scenes/plane/bullet.gd")
+var _gun_tilt := 0.0             # guns angled up a touch to make up for the drop at convergence
+var _cannon_tilt := 0.0
 var _model : Node3D = null
 var _profile : Dictionary = {}
 
@@ -190,6 +194,7 @@ func _apply_profile() -> void:
 	aircraft_name = p.name
 	fm.setup(p)
 	fm.auto_level = 0.35         # a centred stick drifts back toward wings level
+	fm.pitch_hold = 1.0          # ...and holds the climb or dive it was let go in
 	WHEEL_L = p.wheels[0]
 	WHEEL_R = p.wheels[1]
 	WHEEL_T = p.wheels[2]
@@ -203,6 +208,8 @@ func _apply_profile() -> void:
 	CANNON_AMMO_MAX = p.cannon_ammo
 	CANNON_SPEED = p.cannon_speed
 	cannon_label = p.cannon_label
+	_gun_tilt = Bullet.harmonise(BULLET_SPEED, Bullet.DRAG_MG, CONVERGENCE_DIST)
+	_cannon_tilt = Bullet.harmonise(CANNON_SPEED, Bullet.DRAG_CANNON, CONVERGENCE_DIST)
 	MAX_FUEL = p.fuel
 	gun_ammo = GUN_AMMO_MAX
 	cannon_ammo = CANNON_AMMO_MAX
@@ -684,9 +691,19 @@ func _bail_out() -> void:
 	bailed_out.emit(chute)
 
 ## Ground crew: stopped on a friendly airfield, the aircraft is repaired,
-## refuelled and rearmed after a short turnaround.
+## refuelled and rearmed after a short turnaround.  A low pass over the field
+## (under 1,000 ft) does the same instantly, so a damaged pilot can get back
+## into the fight before the raid is over.
 func _service(delta: float) -> void:
 	if _dead:
+		return
+	if not on_ground and _needs_service():
+		var field := _friendly_field()
+		if field >= 0:
+			var m := get_tree().get_first_node_in_group("mission")
+			if global_position.y - float(m.geo.airfields[field][3]) < FLYOVER_SERVICE_ALT:
+				_restore()
+				_say("Low pass over %s - repaired, refuelled and rearmed" % m.geo.airfields[field][0])
 		return
 	var stopped := on_ground and velocity.length() < 0.5
 	if not stopped or not _needs_service():
@@ -702,6 +719,11 @@ func _service(delta: float) -> void:
 	if _service_timer < SERVICE_TIME:
 		return
 	_service_timer = 0.0
+	_restore()
+	_say("Aircraft serviced - ready for take-off")
+
+## Back to a fresh aircraft: undamaged, fire out, full tanks and magazines
+func _restore() -> void:
 	for c in comp_hp:
 		comp_hp[c] = COMP_MAX
 	_on_fire = false
@@ -712,7 +734,10 @@ func _service(delta: float) -> void:
 	fuel = MAX_FUEL
 	gun_ammo = GUN_AMMO_MAX
 	cannon_ammo = CANNON_AMMO_MAX
-	_say("Aircraft serviced - ready for take-off")
+
+## Direction the guns point (the boresight, tilted up for harmonisation)
+func gun_axis() -> Vector3:
+	return global_transform.basis * Vector3(0.0, sin(_gun_tilt), -cos(_gun_tilt))
 
 func _needs_service() -> bool:
 	if fuel < MAX_FUEL - 1.0 or gun_ammo < GUN_AMMO_MAX or cannon_ammo < CANNON_AMMO_MAX or _on_fire:
@@ -723,11 +748,15 @@ func _needs_service() -> bool:
 	return false
 
 func _at_friendly_field() -> bool:
+	return _friendly_field() >= 0
+
+## Index of the friendly airfield below the aircraft, or -1
+func _friendly_field() -> int:
 	var m := get_tree().get_first_node_in_group("mission")
 	if m == null or m.get("geo") == null:
-		return false
+		return -1
 	var id : int = m.geo.airfield_at(WorldOrigin.world_x(global_position.x), WorldOrigin.world_z(global_position.z))
-	return id >= 0 and m.geo.airfields[id][1] == GameSettings.side
+	return id if id >= 0 and m.geo.airfields[id][1] == GameSettings.side else -1
 
 func _say(text: String) -> void:
 	var m := get_tree().get_first_node_in_group("mission")
@@ -741,7 +770,7 @@ func _fire_next_gun() -> void:
 	_gun_index = (_gun_index + 1) % GUN_POSITIONS.size()
 	gun_ammo -= 1
 
-	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized().rotated(Vector3.RIGHT, _gun_tilt)
 	var aim_world : Vector3 = global_transform.basis * aim_local
 	aim_world = (aim_world
 		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
@@ -765,7 +794,7 @@ func _fire_cannon() -> void:
 	_cannon_index = (_cannon_index + 1) % CANNON_POSITIONS.size()
 	cannon_ammo -= 1
 
-	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var aim_local : Vector3 = Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized().rotated(Vector3.RIGHT, _cannon_tilt)
 	var aim_world : Vector3 = global_transform.basis * aim_local
 	aim_world = (aim_world
 		+ global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
@@ -774,6 +803,7 @@ func _fire_cannon() -> void:
 	var bullet := Node3D.new()
 	bullet.set_script(_bullet_script)
 	bullet.damage       = CANNON_DAMAGE
+	bullet.drag_k       = Bullet.DRAG_CANNON
 	bullet.shooter      = self
 	bullet.velocity     = velocity + aim_world * CANNON_SPEED
 	bullet.exclude_rids = [_hitbox_body.get_rid()]

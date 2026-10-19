@@ -426,7 +426,8 @@ func _town_buffers(key: Vector3i, lu: Image, x0: float, z0: float, size: float, 
 		return {}
 	var rect := Rect2(x0, z0, size, size)
 	var ctx := {"rect": rect, "lu": lu, "x0": x0, "z0": z0, "size": size, "sites": {},
-		"rng": RandomNumberGenerator.new(), "out": {}, "water": water}
+		"rng": RandomNumberGenerator.new(), "out": {}, "water": water,
+		"fields": geo.airfields_in(rect.grow(100.0))}
 	ctx.rng.seed = _hash(key.x, key.y, 100)
 	var D := Streets.DIST_CELL
 	for cy in range(floori((z0 - D) / D), floori((z0 + size + D) / D) + 1):
@@ -557,6 +558,11 @@ func _emit(ctx: Dictionary, type: String, centre: Vector2, along: Vector2, front
 	var x3 := Vector3(along.x, 0, along.y)
 	var z3 := x3.cross(Vector3.UP)                   # right-handed: x × y = z
 	var b := Basis(x3 * frontage, Vector3.UP * height, z3 * depth)
+	# Airfields are kept clear (church sites look only at town density)
+	var big := maxf(frontage, depth) * 0.5 + 20.0
+	for a in ctx.fields:
+		if centre.distance_to(a) < geo.AIRFIELD_R + big:
+			return
 	var h : float = geo.land_height(centre.x, centre.y)
 	_instance(out[type], b, Vector3(centre.x - ctx.x0, h - 0.4, centre.y - ctx.z0), tint)
 

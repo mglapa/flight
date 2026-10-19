@@ -61,6 +61,11 @@ var yaw_auth := 3.0
 var alpha_margin := deg_to_rad(1.5)
 ## Player assist: rolls gently back toward wings level with the stick centred
 var auto_level := 0.0
+## Player assist: with the stick centred, holds the flight path the pilot
+## let go at (0..1), instead of the plain 1 G that keeps curving a climb up
+var pitch_hold := 0.0
+var _hold_w := 0.0               # 0 while the stick is moved, ramps to 1 once let go
+var _gamma_hold := 0.0
 
 # ── Damage and engine state (set by the owner each frame, 0..1) ─────────────
 var dmg_wing := 0.0
@@ -306,7 +311,8 @@ func step(body: Node3D, delta: float, stick: float, roll: float, rudder: float,
 		var w_fp := accel.dot(lift_dir) / maxf(V, 5.0)
 		var a_cmd : float
 		if is_nan(g_cmd):
-			var a_trim := minf(_alpha_for_g(1.0, lift_den), alpha0 + x_stall - 0.05)
+			var a_trim := minf(_alpha_for_g(_trim_g(stick, lift_dir, vdir, V, delta), lift_den),
+				alpha0 + x_stall - 0.05)
 			if stick >= 0.0:
 				a_cmd = lerpf(a_trim, minf(_alpha_for_g(g_max, lift_den), a_hi), stick)
 			else:
@@ -355,6 +361,29 @@ func step(body: Node3D, delta: float, stick: float, roll: float, rudder: float,
 	body.rotate_object_local(Vector3(0, 1, 0), -yaw_rate * delta)
 	body.global_transform.basis = body.global_transform.basis.orthonormalized()
 	body.global_position += velocity * delta
+
+## Load factor a centred stick asks for.  1 G curves a climbing (or diving)
+## path further away from level, so the pitch-hold assist asks for cos γ,
+## which keeps the path straight, plus a gentle pull back toward the path
+## angle the pilot let go at.
+func _trim_g(stick: float, lift_dir: Vector3, vdir: Vector3, V: float, delta: float) -> float:
+	var gamma := asin(clampf(vdir.y, -1.0, 1.0)) if V > 20.0 else 0.0
+	if pitch_hold <= 0.0:
+		return 1.0
+	if absf(stick) > 0.05 or stall > 0.0 or spin != 0.0:
+		_hold_w = 0.0
+	else:
+		_hold_w = minf(_hold_w + delta * 2.0, 1.0)
+	# Settle on the path angle once the pitch from the release has died away
+	if _hold_w < 1.0:
+		_gamma_hold = gamma
+	# Running out of speed in a climb the nose falls through, as it would
+	var slow := 1.0 - smoothstep(1.3, 1.7, ias / maxf(stall_speed(0.0), 1.0))
+	if slow > 0.0 and _gamma_hold > -0.04:
+		_gamma_hold = move_toward(_gamma_hold, -0.04, slow * 0.35 * delta)
+	var level := clampf(lift_dir.y * 2.0, 0.0, 1.0)     # not when steeply banked or inverted
+	var n := cos(gamma) + clampf((_gamma_hold - gamma) * 4.0, -0.5, 0.5) * level * _hold_w
+	return lerpf(1.0, n, pitch_hold)
 
 func _alpha_for_g(n: float, lift_den: float) -> float:
 	var cl := n * mass * GRAVITY / lift_den

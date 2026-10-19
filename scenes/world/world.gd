@@ -72,14 +72,22 @@ func finish() -> void:
 func _create_weather() -> void:
 	var we := get_node_or_null("WorldEnvironment") as WorldEnvironment
 	var sun := get_node_or_null("DirectionalLight3D") as DirectionalLight3D
-	# Afternoon sun in the south-west, so the south-facing chalk cliffs gleam
-	if sun:
-		sun.rotation_degrees = Vector3(-38.0, 155.0, 0.0)
+	# Moonlight after sunset: a faint blue fill so dusk raids stay flyable
+	var moon := DirectionalLight3D.new()
+	moon.name = "Moon"
+	moon.light_color = Color(0.55, 0.65, 0.95)
+	moon.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
+	moon.shadow_enabled = false
+	moon.rotation_degrees = Vector3(-35.0, -20.0, 0.0)      # high in the south-east
+	moon.visible = false
+	add_child(moon)
 	weather = Node3D.new()
 	weather.name = "Weather"
 	weather.set_script(Weather)
 	weather.env = we.environment if we else null
 	weather.sun = sun
+	weather.moon = moon
+	weather.hour = GameSettings.resolved_hour()
 	weather.kind = GameSettings.resolved_weather()
 	add_child(weather)
 

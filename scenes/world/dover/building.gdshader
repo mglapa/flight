@@ -9,6 +9,7 @@ shader_type spatial;
 
 render_mode diffuse_lambert, specular_disabled, cull_back;
 
+global uniform vec4 sky_tint;              // dims the self-light with the time of day
 uniform float appear = 1.0;              // per tile (each tile has its own material)
 uniform float fade_start = 6200.0;
 uniform float fade_end = 8000.0;
@@ -49,6 +50,6 @@ void fragment() {
 	else if (vtag > 0.5) col = vcol * roof_color(custom.a) * (0.95 + 0.1 * fract(custom.a * 11.0));
 	ALBEDO = pow(clamp(col, 0.0, 1.0), vec3(2.2));    // colours are authored in sRGB
 	// A little self-light keeps shaded brick warm instead of sky-blue
-	EMISSION = ALBEDO * 0.16;
+	EMISSION = ALBEDO * 0.16 * sky_tint.rgb;
 	ROUGHNESS = 1.0;
 }

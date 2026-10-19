@@ -10,6 +10,7 @@ shader_type spatial;
 
 render_mode diffuse_lambert, specular_disabled, cull_back;
 
+global uniform vec4 sky_tint;             // dims the self-light with the time of day
 uniform float now = 0.0;
 uniform vec3 wind = vec3(3.0, 0.0, 1.2);
 
@@ -61,6 +62,6 @@ void fragment() {
 	// Faceted shading
 	NORMAL = normalize(cross(dFdy(VERTEX), dFdx(VERTEX)));
 	ALBEDO = col;
-	EMISSION = glow + col * 0.12;
+	EMISSION = glow + col * 0.12 * sky_tint.rgb;
 	ROUGHNESS = 1.0;
 }

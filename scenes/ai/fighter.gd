@@ -90,6 +90,7 @@ var _smoke_opacity := 0.0
 
 var _hit_flash_script = preload("res://scenes/enemies/hit_flash.gd")
 var _bullet_script = preload("res://scenes/plane/bullet.gd")
+const Bullet := preload("res://scenes/plane/bullet.gd")
 var _body_rid : RID
 var _model : Node3D = null
 var _world : Node = null
@@ -272,7 +273,8 @@ func _fly(delta: float) -> void:
 		if dist < 800.0:
 			# Lead pursuit: point where the bullets will meet it
 			var tv : Vector3 = target.get_velocity() if target.has_method("get_velocity") else Vector3.ZERO
-			goal = tp + (tv - _velocity) * (dist / float(_p.gun_speed))
+			var sol := Bullet.intercept(tp - pos, _velocity, tv, float(_p.gun_speed), Bullet.DRAG_MG, pos.y)
+			goal = pos + (sol[0] as Vector3) * dist if not sol.is_empty() else tp
 		else:
 			goal = tp - tf * (PURSUIT_DIST * clampf(1.0 - dist / 1500.0, 0.0, 1.0))
 		# Close in fast, then settle just above the target's speed at gun range
@@ -362,18 +364,19 @@ func _fly(delta: float) -> void:
 		var reach := FIRE_RANGE * (1.25 if target.is_in_group("bombers") else 1.0)
 		if to_tgt.length() < reach and fwd.angle_to(to_tgt.normalized()) < cone:
 			if _fire_cd <= 0.0 and _gun_ammo > 0:
-				_fire(_guns[_gun_idx % _guns.size()], 1, float(_p.gun_speed))
+				_fire(_guns[_gun_idx % _guns.size()], 1, float(_p.gun_speed), Bullet.DRAG_MG)
 				_gun_idx += 1
 				_gun_ammo -= 1
 				_fire_cd = FIRE_INTERVAL
 			if _cannon_cd <= 0.0 and _cannon_ammo > 0 and not _cannons.is_empty():
-				_fire(_cannons[_gun_idx % _cannons.size()], 3, float(_p.cannon_speed))
+				_fire(_cannons[_gun_idx % _cannons.size()], 3, float(_p.cannon_speed), Bullet.DRAG_CANNON)
 				_cannon_ammo -= 1
 				_cannon_cd = CANNON_INTERVAL
 
-func _fire(gun_local: Vector3, damage: int, muzzle_speed: float) -> void:
+func _fire(gun_local: Vector3, damage: int, muzzle_speed: float, drag: float) -> void:
 	var muzzle : Vector3 = global_transform * gun_local
-	var aim_local := Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized()
+	var tilt := Bullet.harmonise(muzzle_speed, drag, CONVERGENCE_DIST)
+	var aim_local := Vector3(-gun_local.x, 0.0, -CONVERGENCE_DIST).normalized().rotated(Vector3.RIGHT, tilt)
 	var aim : Vector3 = global_transform.basis * aim_local
 	aim = (aim + global_transform.basis.x * randf_range(-GUN_SPREAD, GUN_SPREAD)
 		+ global_transform.basis.y * randf_range(-GUN_SPREAD, GUN_SPREAD)).normalized()
@@ -381,6 +384,7 @@ func _fire(gun_local: Vector3, damage: int, muzzle_speed: float) -> void:
 	bullet.set_script(_bullet_script)
 	bullet.velocity = _velocity + aim * muzzle_speed
 	bullet.damage = damage
+	bullet.drag_k = drag
 	bullet.shooter = self
 	bullet.exclude_rids = [_body_rid]
 	get_parent().add_child(bullet)

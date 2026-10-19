@@ -10,11 +10,16 @@ extends Node3D
 ##   Altocumulus                 — patches of small puffs at 3.5–5 km
 ##   Cirrus / cirrostratus       — thin streaks and a milky veil at 8–9.5 km
 ##
-## world.gd sets `env` and `sun` before add_child().
+## It also runs the clock: the sun's position for the hour (Kent, mid-August
+## 1940), with the sky, light and haze colours following it from a high
+## summer sun through golden hour and sunset to twilight.
+##
+## world.gd sets `env`, `sun`, `moon` and `hour` before add_child().
 
 const Cloud := preload("res://scenes/world/weather/cloud.gd")
 const CLOUD_SHADER := preload("res://scenes/world/weather/cloud.gdshader")
 const VEIL_SHADER  := preload("res://scenes/world/weather/veil.gdshader")
+const SKY_SHADER   := preload("res://scenes/world/weather/sky.gdshader")
 const Settings := preload("res://scenes/game_settings.gd")
 const W := Settings.Weather
 
@@ -26,8 +31,31 @@ const SPAWN_LINE_A := Vector3(0, 4572, -8000)
 const SPAWN_LINE_B := Vector3(0, 4572, 6000)
 const SPAWN_CLEAR  := 900.0
 
+## Sun: latitude, longitude (degrees), mid-August declination and the
+## equation of time (hours)
+const LATITUDE := 51.1
+const LONGITUDE := 1.2
+const DECLINATION := 13.8
+const EQ_OF_TIME := -0.075
+const BST := 1.0                 ## clocks an hour ahead of GMT
+const CLOCK_RATE := 1.0          ## game hours per real hour
+const LIGHT_UPDATE := 1.0        ## seconds between sky / light updates
+
+## Colours away from full daylight (the weather sets the daylight ones)
+const NIGHT_TOP := Color(0.020, 0.030, 0.075)
+const NIGHT_HORIZON := Color(0.045, 0.060, 0.10)
+const TWILIGHT_TOP := Color(0.09, 0.15, 0.36)
+const TWILIGHT_HORIZON := Color(0.46, 0.36, 0.42)
+const GOLDEN_HORIZON := Color(0.95, 0.62, 0.40)
+const GLOW := Color(1.0, 0.42, 0.12)
+const SUN_LOW := Color(1.0, 0.62, 0.36)
+const SUN_SETTING := Color(1.0, 0.40, 0.15)
+const NIGHT_TINT := Color(0.16, 0.18, 0.28)
+
 var env : Environment
 var sun : DirectionalLight3D
+var moon : DirectionalLight3D     ## dim, shadowless fill once the sun is down
+var hour := 16.5                  ## local time (BST), runs on in real time
 var kind : int = W.FAIR_CUMULUS
 
 var _rng := RandomNumberGenerator.new()
@@ -38,8 +66,13 @@ var _cloud_mat : ShaderMaterial
 var _dark_mat : ShaderMaterial
 var _deck_base := -INF            ## overcast: lighting dims below this height
 var _deck_top := -INF
-var _sun_energy := 1.3
+var _sun_energy := 1.3           ## after the time of day (before overcast dimming)
 var _ambient := 1.0
+var _fog_color := Color.WHITE
+var _day := {}                    ## the weather's full-daylight palette
+var _clarity := 1.0               ## how strongly a low sun colours the sky
+var _sky_mat : ShaderMaterial
+var _light_clock := 0.0
 
 func _ready() -> void:
 	add_to_group("origin_container")
@@ -53,6 +86,7 @@ func _ready() -> void:
 		W.OVERCAST:     _overcast()
 		W.HIGH_CLOUD:   _high_cloud()
 		_:              _fair()
+	_update_light()
 
 func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
@@ -73,41 +107,102 @@ func _process(delta: float) -> void:
 				n.position.x -= signf(d.x) * period
 			if absf(d.z) > period * 0.5:
 				n.position.z -= signf(d.z) * period
+	hour = fmod(hour + delta * CLOCK_RATE / 3600.0, 24.0)
+	_light_clock -= delta
+	if _light_clock <= 0.0:
+		_light_clock = LIGHT_UPDATE
+		_update_light()
 	if _deck_base == -INF or sun == null:
 		return
 	# Under the overcast the sun is hidden: dim, cool, flat light
 	var y := cp.y
 	var below := 1.0 - smoothstep(_deck_base, _deck_top + 150.0, y)
 	sun.light_energy = lerpf(_sun_energy, _sun_energy * 0.22, below)
-	env.ambient_light_energy = lerpf(_ambient, _ambient * 0.6, below)
-	env.fog_light_color = Color(0.68, 0.72, 0.77).lerp(Color(0.52, 0.56, 0.60), below)
+	if env:
+		env.ambient_light_energy = lerpf(_ambient, _ambient * 0.6, below)
+		env.fog_light_color = _fog_color.lerp(_fog_color * 0.78, below)
 
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
 
+## The weather's full-daylight sky; _update_light() turns it into the
+## sky for the hour.  clarity: how much the low sun's colours show through.
 func _sky(top: Color, horizon: Color, fog_density: float, sun_energy: float,
-		sun_color := Color(1.0, 0.95, 0.86), ambient := 1.0) -> void:
-	_sun_energy = sun_energy
-	_ambient = ambient
+		sun_color := Color(1.0, 0.95, 0.86), ambient := 1.0, clarity := 1.0) -> void:
+	_day = {"top": top, "horizon": horizon, "sun": sun_energy, "sun_color": sun_color, "ambient": ambient}
+	_clarity = clarity
 	if env:
 		env.fog_enabled = true
-		env.fog_light_color = horizon
 		env.fog_light_energy = 1.0
 		env.fog_density = fog_density
 		env.fog_aerial_perspective = 0.5
 		env.fog_sky_affect = 0.35
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-		env.ambient_light_energy = ambient
-		var sky_mat := env.sky.sky_material as ProceduralSkyMaterial if env.sky else null
-		if sky_mat:
-			sky_mat.sky_top_color = top
-			sky_mat.sky_horizon_color = horizon
-			sky_mat.ground_horizon_color = horizon
-			sky_mat.ground_bottom_color = Color(0.10, 0.22, 0.32)
+		_sky_mat = ShaderMaterial.new()
+		_sky_mat.shader = SKY_SHADER
+		if env.sky == null:
+			env.sky = Sky.new()
+		env.sky.sky_material = _sky_mat
+		env.sky.radiance_size = Sky.RADIANCE_SIZE_64
+
+## Direction toward the sun at a local (BST) hour, in game axes (+Z north,
+## -X east)
+static func sun_direction(at_hour: float) -> Vector3:
+	var lat := deg_to_rad(LATITUDE)
+	var dec := deg_to_rad(DECLINATION)
+	var solar := at_hour - BST + LONGITUDE / 15.0 + EQ_OF_TIME
+	var ha := deg_to_rad(15.0 * (solar - 12.0))           # hour angle, + afternoon
+	var el := asin(sin(lat) * sin(dec) + cos(lat) * cos(dec) * cos(ha))
+	var az := atan2(sin(ha), cos(ha) * sin(lat) - tan(dec) * cos(lat))   # from south, + west
+	return Vector3(sin(az) * cos(el), sin(el), -cos(az) * cos(el))
+
+## Sun, sky, haze and fill light for the current hour
+func _update_light() -> void:
+	if _day.is_empty():
+		return
+	var to_sun := sun_direction(hour)
+	var e := rad_to_deg(asin(to_sun.y))                   # sun elevation, degrees
+	var top : Color = NIGHT_TOP.lerp(TWILIGHT_TOP, smoothstep(-11.0, -3.0, e)) \
+		.lerp(_day.top, smoothstep(-3.0, 14.0, e))
+	var golden := GOLDEN_HORIZON.lerp((_day.horizon as Color) * 0.7, 1.0 - _clarity)
+	var hz : Color = NIGHT_HORIZON.lerp(TWILIGHT_HORIZON, smoothstep(-11.0, -3.5, e)) \
+		.lerp(golden, smoothstep(-3.5, 1.5, e)).lerp(_day.horizon, smoothstep(3.0, 20.0, e))
+	var glow := _clarity * (1.0 - smoothstep(4.0, 20.0, e)) * smoothstep(-11.0, -1.0, e)
+	var sun_k := smoothstep(-1.5, 5.0, e)
+	var sun_col : Color = (_day.sun_color as Color).lerp(SUN_LOW, 1.0 - smoothstep(2.0, 25.0, e)) \
+		.lerp(SUN_SETTING, 1.0 - smoothstep(-1.0, 4.0, e))
+	var dark := 1.0 - smoothstep(-9.0, 2.0, e)            # 1 = night
+	_sun_energy = _day.sun * sun_k * (0.6 + 0.4 * smoothstep(0.0, 20.0, e))
+	_ambient = _day.ambient
+	_fog_color = hz
+	var tint := NIGHT_TINT.lerp(Color.WHITE, smoothstep(-8.0, 6.0, e))
+	tint = tint.lerp(tint * Color(1.0, 0.72, 0.52), glow * 0.7)
+	RenderingServer.global_shader_parameter_set("sky_tint", tint)
 	if sun:
-		sun.light_energy = sun_energy
-		sun.light_color = sun_color
+		sun.global_transform.basis = Basis.looking_at(-to_sun, Vector3.UP)
+		sun.light_color = sun_col
+		sun.light_energy = _sun_energy
+		sun.shadow_enabled = e > -1.0
+		sun.visible = e > -2.0
+	if moon:
+		moon.light_energy = 0.12 * dark
+		moon.visible = dark > 0.01
+	if env:
+		env.fog_light_color = hz
+		env.fog_sun_scatter = 0.25 * glow
+		env.ambient_light_energy = _ambient
+		env.tonemap_exposure = lerpf(1.0, 1.45, dark)
+	if _sky_mat:
+		_sky_mat.set_shader_parameter("top_color", top)
+		_sky_mat.set_shader_parameter("horizon_color", hz)
+		_sky_mat.set_shader_parameter("ground_color", Color(0.10, 0.22, 0.32).lerp(Color(0.01, 0.02, 0.04), dark))
+		_sky_mat.set_shader_parameter("glow_color", GLOW)
+		_sky_mat.set_shader_parameter("glow", glow)
+		_sky_mat.set_shader_parameter("sun_dir", to_sun)
+		_sky_mat.set_shader_parameter("sun_color", sun_col * (0.4 + 0.6 * sun_k))
+		_sky_mat.set_shader_parameter("sun_disc", _clarity)
+		_sky_mat.set_shader_parameter("stars", (1.0 - smoothstep(-11.0, -5.0, e)) * _clarity)
 
 func _cloud_material(self_light: float) -> ShaderMaterial:
 	var m := ShaderMaterial.new()
@@ -134,7 +229,7 @@ func _fair() -> void:
 
 func _storms() -> void:
 	_sky(Color(0.30, 0.38, 0.52), Color(0.56, 0.60, 0.66), 0.000016, 0.95,
-		Color(1.0, 0.90, 0.78), 0.8)
+		Color(1.0, 0.90, 0.78), 0.8, 0.55)
 	_scatter_cumulus(70, INNER, 1300.0, Vector2(500, 1600), Vector2(0.6, 0.95), 1,
 		0.0, Color(0.55, 0.58, 0.64))
 	_scatter_cumulus(120, OUTER, 1300.0, Vector2(700, 2000), Vector2(0.6, 0.9), 0, INNER,
@@ -152,7 +247,7 @@ func _storms() -> void:
 
 func _overcast() -> void:
 	_sky(Color(0.42, 0.50, 0.62), Color(0.68, 0.72, 0.77), 0.000013, 1.2,
-		Color(1.0, 0.96, 0.9), 0.85)
+		Color(1.0, 0.96, 0.9), 0.85, 0.7)
 	_deck_base = 1300.0
 	_deck_top = 1800.0
 	_stratocumulus_deck(_deck_base, _deck_top, 0.82)

@@ -360,10 +360,11 @@ func set_player(p: Node3D) -> void:
 	player = p
 	_had_player = true
 	for i in range(_wing.size()):
+		if not is_instance_valid(_wing[i]):
+			continue
 		var w : Node3D = _wing[i]
-		if is_instance_valid(w):
-			w.formation_leader = p
-			w.formation_offset = WING_SLOTS[i % WING_SLOTS.size()]
+		w.formation_leader = p
+		w.formation_offset = WING_SLOTS[i % WING_SLOTS.size()]
 
 # ---------------------------------------------------------------------------
 # Running the battle

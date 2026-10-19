@@ -10,6 +10,7 @@ const NAVBALL_SHADER := preload("res://scenes/ui/navball.gdshader")
 const VISION_SHADER := preload("res://scenes/ui/pilot_vision.gdshader")
 const MapView := preload("res://scenes/ui/map_view.gd")
 const MissionMenu := preload("res://scenes/ui/mission_menu.gd")
+const Bullet := preload("res://scenes/plane/bullet.gd")
 
 const REF := Vector2(2560, 1440)
 const PANEL_H := 250.0
@@ -21,6 +22,8 @@ const BALL_R := 86.0
 const DIAL_R := 76.0
 const RADAR_RANGE := 3000.0
 const BRACKET_RANGE := 12000.0     # aircraft brackets drawn out to this range (m)
+const LEAD_RANGE := Vector2(500.0, 1500.0)   # lead circle: solid inside x, gone beyond y (m)
+const LEAD_ANGLE := Vector2(deg_to_rad(2.0), deg_to_rad(8.0))   # solid / gone, gunsight to aim point
 
 const TXT        := Color(0.92, 0.94, 0.96)
 const TXT_DIM    := Color(0.62, 0.67, 0.72)
@@ -604,8 +607,8 @@ func _draw_ball_overlay(c: Vector2, r: float) -> void:
 func _draw_gunsight() -> void:
 	if not camera:
 		return
-	var fwd := -plane.global_transform.basis.z
-	var bullet_dir : Vector3 = (plane.velocity + fwd * 800.0).normalized()
+	var fwd : Vector3 = plane.gun_axis()
+	var bullet_dir : Vector3 = (plane.velocity + fwd * float(plane.BULLET_SPEED)).normalized()
 	var aim := plane.global_position + bullet_dir * 2000.0
 	if (aim - camera.global_position).dot(-camera.global_transform.basis.z) <= 0.0:
 		return
@@ -618,6 +621,43 @@ func _draw_gunsight() -> void:
 		var d := Vector2(cos(a), sin(a))
 		_front.draw_line(pos + d * (r - 8 * _s), pos + d * (r + 8 * _s), col, lw)
 	_front.draw_circle(pos, 2.5 * _s, col)
+	_draw_lead(fwd)
+
+## Lead circle: where the gunsight must sit for rounds fired now to meet an
+## enemy.  It fades in as the range closes and as the sight comes onto it,
+## and allows for the rounds' drag and drop (see bullet.gd intercept()).
+func _draw_lead(fwd: Vector3) -> void:
+	var B := float(plane.BULLET_SPEED)
+	var vs : Vector3 = plane.velocity
+	var best := 0.0
+	var best_dir := Vector3.ZERO
+	for e in get_tree().get_nodes_in_group("enemies"):
+		if not is_instance_valid(e) or e.get("_dead") == true or not e.has_method("get_velocity"):
+			continue
+		var r : Vector3 = (e as Node3D).global_position - plane.global_position
+		var c := r.length_squared()
+		if c > LEAD_RANGE.y * LEAD_RANGE.y:
+			continue
+		var sol := Bullet.intercept(r, vs, e.get_velocity(), B, Bullet.DRAG_MG, plane.global_position.y, true)
+		if sol.is_empty():
+			continue
+		var d : Vector3 = sol[0]
+		var vis := (1.0 - smoothstep(LEAD_RANGE.x, LEAD_RANGE.y, sqrt(c))) \
+			* (1.0 - smoothstep(LEAD_ANGLE.x, LEAD_ANGLE.y, fwd.angle_to(d)))
+		if vis > best:
+			best = vis
+			best_dir = d
+	if best_dir == Vector3.ZERO:
+		return
+	var aim : Vector3 = plane.global_position + (vs + best_dir * B).normalized() * 2000.0
+	if camera.is_position_behind(aim):
+		return
+	var pos := camera.unproject_position(aim)
+	var alpha := best
+	var col := Color(BAD, 0.95 * alpha)
+	var lw := maxf(1.0, 2.0 * _s)
+	_front.draw_arc(pos, 11.0 * _s, 0.0, TAU, 32, Color(0, 0, 0, 0.45 * alpha), lw + 2.0 * _s)
+	_front.draw_arc(pos, 11.0 * _s, 0.0, TAU, 32, col, lw)
 
 # ---------------------------------------------------------------------------
 # Mission: objective panel, message feed, target / raid markers
